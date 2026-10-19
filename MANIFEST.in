@@ -1,0 +1,6 @@
+include README.md pyproject.toml setup.py
+recursive-include src *.py
+recursive-include tests *.py
+recursive-include tests/fixtures *.json *.cbm *.npz
+recursive-include examples *.py
+global-exclude __pycache__ *.py[cod]

@@ -1,0 +1,172 @@
+{
+  "format_version": 1,
+  "package_version": "0.1.0",
+  "python_version": "3.13.15",
+  "backend": {
+    "name": "catboost",
+    "params": {
+      "iterations": 8,
+      "depth": 2,
+      "verbose": false,
+      "thread_count": 1,
+      "random_seed": 42,
+      "allow_writing_files": false
+    },
+    "fit_params": {},
+    "early_stopping_rounds": 5
+  },
+  "policy": {
+    "min_precision_macro": 0,
+    "min_recall_macro": 0,
+    "min_f1_macro": 0,
+    "max_drop_from_full": 1,
+    "tolerance": 1e-12
+  },
+  "min_sensors": 1,
+  "classes": [
+    0,
+    1
+  ],
+  "n_features_in": 4,
+  "feature_names": null,
+  "sensor_groups": {
+    "1": [
+      0,
+      1
+    ],
+    "2": [
+      2,
+      3
+    ]
+  },
+  "selected_sensor_ids": [
+    1
+  ],
+  "selected_columns": [
+    0,
+    1
+  ],
+  "selected_feature_names": null,
+  "baseline_metrics": {
+    "precision_macro": 1.0,
+    "recall_macro": 1.0,
+    "f1_macro": 1.0
+  },
+  "effective_floors": {
+    "precision_macro": 0,
+    "recall_macro": 0,
+    "f1_macro": 0
+  },
+  "final_metrics": {
+    "precision_macro": 0.9545454545454546,
+    "recall_macro": 0.95,
+    "f1_macro": 0.949874686716792
+  },
+  "history": [
+    {
+      "trial_id": 1,
+      "configuration_id": 0,
+      "sensor_id": 2,
+      "sensors_before": [
+        1,
+        2
+      ],
+      "proposed_sensors": [
+        1
+      ],
+      "importance": 0.021149524923469065,
+      "metrics": {
+        "precision_macro": 0.9545454545454546,
+        "recall_macro": 0.95,
+        "f1_macro": 0.949874686716792
+      },
+      "change_from_full": {
+        "precision_macro": -0.045454545454545414,
+        "recall_macro": -0.050000000000000044,
+        "f1_macro": -0.05012531328320802
+      },
+      "accepted": true,
+      "worst_margin": 0.949874686716792,
+      "failed_metrics": [],
+      "train_seconds": 0.0400828999991063,
+      "validation_predict_seconds": 0.0006258999983401736
+    }
+  ],
+  "accepted_history": [
+    {
+      "configuration_id": 0,
+      "trial_id": 0,
+      "sensor_ids": [
+        1,
+        2
+      ],
+      "metrics": {
+        "precision_macro": 1.0,
+        "recall_macro": 1.0,
+        "f1_macro": 1.0
+      }
+    },
+    {
+      "configuration_id": 1,
+      "trial_id": 1,
+      "sensor_ids": [
+        1
+      ],
+      "metrics": {
+        "precision_macro": 0.9545454545454546,
+        "recall_macro": 0.95,
+        "f1_macro": 0.949874686716792
+      }
+    }
+  ],
+  "shap_history": [
+    {
+      "configuration_id": 0,
+      "trial_id": 0,
+      "sensor_ids": [
+        1,
+        2
+      ],
+      "importance": [
+        [
+          1,
+          0.373611064018835
+        ],
+        [
+          2,
+          0.021149524923469065
+        ]
+      ]
+    },
+    {
+      "configuration_id": 1,
+      "trial_id": 1,
+      "sensor_ids": [
+        1
+      ],
+      "importance": [
+        [
+          1,
+          0.4020342205055162
+        ]
+      ]
+    }
+  ],
+  "timings": {
+    "full_training_seconds": 0.21098700000038662,
+    "baseline_prediction_seconds": 0.002883700000893441,
+    "initial_shap_seconds": 0.0023717999993095873,
+    "trial_training_seconds": 0.0400828999991063,
+    "validation_prediction_seconds": 0.0006258999983401736,
+    "shap_update_seconds": 0.0034243999998579966,
+    "elimination_loop_seconds": 0.04623200000060024,
+    "total_fit_seconds": 0.8626579000010679
+  },
+  "stop_reason": "min_sensors_reached",
+  "attempted_sensor_ids": [
+    2
+  ],
+  "rejected_sensor_ids": [],
+  "model_file": "model.cbm",
+  "model_sha256": "58617641f18141cedc0e2cd3d74d112999561eec067bd2bd101d14c0580de1e6"
+}

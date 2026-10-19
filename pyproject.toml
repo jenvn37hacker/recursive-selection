@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=77", "wheel", "Cython>=3.1,<4"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "recursive-group-selection"
+version = "0.4.0"
+description = "Validation-constrained recursive feature-group selection and paired bootstrap evaluation"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = ["numpy>=1.26,<3", "scikit-learn>=1.4,<2"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+]
+
+[project.optional-dependencies]
+catboost = ["catboost>=1.2.8,<2"]
+xgboost = ["xgboost>=2.1,<4"]
+lightgbm = ["lightgbm>=4.3,<5"]
+all = ["catboost>=1.2.8,<2", "xgboost>=2.1,<4", "lightgbm>=4.3,<5"]
+plot = ["matplotlib>=3.8,<4"]
+report = ["pandas>=2.2,<4"]
+notebook = ["pandas>=2.2,<4", "matplotlib>=3.8,<4", "ipython>=8,<10"]
+test = ["pytest>=8,<10"]
+dev = ["pytest>=8,<10", "build>=1.2,<2", "Cython>=3.1,<4", "setuptools>=77", "wheel"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = ["integration: exercises an installed optional model backend"]
+
+[tool.cibuildwheel]
+build = "cp311-* cp312-* cp313-*"
+skip = "*-win32 *-manylinux_i686 *-musllinux_* *-manylinux_aarch64 *-manylinux_ppc64le *-manylinux_s390x *-manylinux_armv7l"
+test-extras = ["all", "plot", "report", "test"]
+test-command = "python -m pytest {project}/tests --require-compiled --require-all-backends"
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64"]
+manylinux-x86_64-image = "manylinux_2_28"
+
+[tool.cibuildwheel.windows]
+archs = ["AMD64"]
+
+[tool.cibuildwheel.macos]
+before-test = "brew list libomp >/dev/null 2>&1 || brew install libomp"

@@ -1,0 +1,47 @@
+name: Build group-selection binary wheels
+
+# Manual only: editing or pushing source does not automatically build a wheel.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x64
+            os: windows-latest
+            arch: AMD64
+          - target: linux-x86_64
+            os: ubuntu-24.04
+            arch: x86_64
+          - target: macos-intel
+            os: macos-15-intel
+            arch: x86_64
+          - target: macos-apple-silicon
+            os: macos-15
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Install wheel build driver
+        run: python -m pip install "cibuildwheel>=3.3,<4"
+      - name: Build and test installed binary wheels
+        run: python -m cibuildwheel . --output-dir wheelhouse
+        env:
+          CIBW_ARCHS: ${{ matrix.arch }}
+          CIBW_ENVIRONMENT: "OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1"
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: group-selection-${{ matrix.target }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error

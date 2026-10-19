@@ -1,0 +1,483 @@
+# Recursive Group Selection
+
+A library for selecting **complete feature groups** through recursive elimination,
+refitting, validation checks, and configuration-specific retries. The library is
+independent of the Z24 and QUGS notebooks. The distribution name is
+`recursive-group-selection`; the import name is `recursive_group_selection`.
+The package has not been published on PyPI.
+
+## Design
+
+`RecursiveGroupSelector` uses composition rather than inheriting from CatBoost.
+
+| Component | Responsibility |
+| --- | --- |
+| Selector | Coordinate the search loop and accepted state |
+| Model adapter | Create fresh models, fit, predict, and validate model schemas |
+| SHAP provider | Normalize backend attributions to `(samples, outputs, features)` |
+| Group ranker | Compute mean absolute attribution for each feature group |
+| Quality policy | Define fixed thresholds and make pass/fail decisions |
+| Recorder | Receive copied events for logging, without mutable model/state access |
+
+Three backends are available: `CatBoostClassifier`, `XGBClassifier`, and
+`LGBMClassifier`. These libraries are imported when needed and are not bundled
+inside this library's wheel. The `shap` package is not required: each backend uses
+its library's native TreeSHAP API. XGBoost and LightGBM use their respective best
+iterations when computing SHAP.
+
+This is a greedy search: the final configuration satisfies the thresholds, but
+the algorithm does not guarantee the globally smallest group set. When the stop
+reason is `all_candidates_rejected`, every attempt to remove **one** group from
+the final configuration has been rejected in that same configuration.
+`min_groups_reached` means that the user-defined minimum group count was reached.
+
+## Usage
+
+Version 0.4.0 requires an explicit `model_adapter`. Configure the model through
+adapter `params` and training through `fit_params`; there is no estimator input,
+automatic backend detection, or backend registration API.
+
+```python
+from recursive_group_selection import CatBoostAdapter, MacroQualityPolicy, RecursiveGroupSelector
+
+selector = RecursiveGroupSelector(
+    model_adapter=CatBoostAdapter(
+        params={
+            "iterations": 1000, "depth": 5, "learning_rate": 0.03,
+            "loss_function": "MultiClass", "eval_metric": "Accuracy",
+            "random_seed": 42, "l2_leaf_reg": 5, "random_strength": 1,
+            "verbose": 20, "allow_writing_files": False,
+        },
+        fit_params={"early_stopping_rounds": 5, "use_best_model": True},
+    ),
+    quality_policy=MacroQualityPolicy(
+        min_precision_macro=0.87, min_recall_macro=0.87, min_f1_macro=0.87,
+        max_drop_from_full=0.04, tolerance=1e-12,
+    ),
+    min_groups=1,
+)
+feature_groups = {
+    group + 1: list(range(10 * group, 10 * group + 10))
+    for group in range(X_train.shape[1] // 10)
+}
+selector.fit(X_train, y_train, eval_set=(X_val, y_val),
+             feature_groups=feature_groups, feature_names=feature_names)
+model = selector.estimator_  # Fitted output model, expecting selected columns.
+predictions = selector.predict(X_test)  # Selector accepts the original full schema.
+```
+
+Choose `XGBoostAdapter(params=...)` or `LightGBMAdapter(params=...)` explicitly for
+other supported models. All adapters accept keyword configuration only. Set seeds,
+model parameters and the early-stopping metric for the chosen backend. Different
+backends can produce different models, rankings and selection paths. Do not pass
+CatBoost-specific fit options to another backend. Five early-stopping rounds are
+used by default; CatBoost retains the best model, XGBoost uses its best iteration,
+and LightGBM uses an early-stopping callback.
+
+If a full model is already fitted, configure `params=full_model.get_params()` in
+the adapter and pass `full_model=full_model` to `fit()` to reuse it. The library
+checks backend, parameters, feature count and classes; the caller owns data,
+column-order and training-protocol provenance. No input model is retrained in place.
+
+`estimator_` (with a trailing underscore) remains the fitted output model; it is
+unrelated to the removed constructor parameter. Custom backends remain supported
+by passing a `model_adapter` implementing the protocols in `contracts.py`.
+
+## Rules and supported data
+
+- `X_train` and `X_val` must be finite, dense, two-dimensional numeric matrices
+  with the same column order. Extract features and clean NaN values outside the
+  library. Raw time-series tensors, sparse matrices, categorical/text/embedding
+  inputs, and feature weights are not currently supported.
+- `y` contains one label per row. XGBoost requires consecutive integer classes
+  starting at zero. Encode labels consistently before calling the library if
+  you want to switch backends easily.
+- `feature_groups` maps positive integer group IDs to zero-based column indices.
+  Each column must belong to exactly one group. Groups need not be contiguous or
+  have equal sizes. Retained columns always follow the original matrix order.
+- DataFrame column names and order are checked. For NumPy inputs, the caller is
+  responsible for preserving the physical column order.
+- Each threshold is `max(absolute_floor, original_full_score - max_drop_from_full)`.
+  `0.04` means four percentage points, not a relative reduction of four percent.
+- The full model must satisfy the thresholds before selection starts. Macro
+  scores use the fixed class set from the full model.
+- No group is initially protected. The group with the lowest SHAP importance is
+  tried first; ties are resolved by trying the higher group ID first.
+- Every trial trains a fresh model. A failed trial retains the accepted model and
+  ranking. An accepted trial clears the rejection set and recomputes SHAP.
+  Training/prediction errors propagate as errors, not metric-based rejections.
+- Test, holdout, and bootstrap data do not participate in selection. Validation
+  data may be reused for early stopping and selection; use an independent
+  evaluation protocol appropriate for the problem.
+- Attributions are aggregated over features; they are not group Shapley values or
+  causal effects. Native binary SHAP may have one raw-output axis; multiclass
+  SHAP has one output axis per class.
+
+## Results and logging
+
+`fit()` returns `self`. The following attributes are available after fitting:
+
+```text
+estimator_ / full_model_
+selected_group_ids_ / selected_columns_ / selected_feature_names_
+baseline_metrics_ / effective_floors_ / final_metrics_
+history_ / accepted_history_ / shap_history_
+initial_ranking_ / final_ranking_
+attempted_group_ids_ / rejected_group_ids_
+timings_ / stop_reason_ / result_
+```
+
+History and snapshots are immutable dataclass records. `history_records()` returns
+a list of dictionaries suitable for pandas. `trial_id` starts at one;
+`configuration_id` starts at zero and increases only after an accepted removal.
+Scores, margins, and differences use the 0-to-1 scale; multiply by 100 to express
+them in percentage points. The loop timing excludes full-model training and
+initial SHAP. `total_fit_seconds` also includes preparation, validation, and
+initialization. Identical timings, models, or group sets across operating
+systems are not guaranteed.
+
+An optional recorder must implement `record(event)`. Each event is a deep-copied
+dictionary. Events are `run_started`, `initialized`, `trial_started`,
+`trial_completed`, `configuration_accepted`, and `run_finished`.
+Callback errors cause fitting to fail; they are not hidden as trial rejections.
+
+## Saving and loading
+
+```python
+selector.save("my_selection")  # Requires a new or empty directory.
+restored = RecursiveGroupSelector.load("my_selection")
+predictions = restored.predict(X_test)
+```
+
+The native model (`.cbm`/`.json`/`.txt`) is saved alongside `selection.json`, which
+contains the schema, policy, backend configuration, classes, history, timings, and
+model SHA-256 hash. Pickle is not used. Only the final model is saved;
+`full_model_` is `None` after loading.
+
+After loading, LightGBM uses a native `Booster` in `estimator_`. Use
+`restored.predict(X_full)` to obtain class labels using the saved class mapping.
+The backend runtime version must be able to read the corresponding native model.
+Custom policies, rankers, backends, and callbacks that are not JSON-compatible
+require application-specific persistence. They are not automatically
+deserialized or executed from metadata.
+
+## Extending backends
+
+Small protocols are defined in `contracts.py`. Supply a custom `model_adapter`
+and, when needed, a custom `ranker`. No registration step is required. The default ranker
+also requires the adapter to provide `feature_shap(model, X, y)` with shape
+`(samples, outputs, features)`, excluding the base-value column.
+If a model does not support SHAP, supply a different ranker.
+The search loop calls these contracts without branching on library names.
+
+## Building locally on Windows
+
+You can read, edit, and test the source without building it. To build binaries,
+use 64-bit CPython 3.11, 3.12, or 3.13 and MSVC C++ Build Tools compatible with
+that Python version. Run the following from this standalone library directory
+(currently `C:\Users\phuotran\Data\research\recursive_group_selection`):
+
+```powershell
+py -3.13 -m venv .venv
+$libraryPython = ".\.venv\Scripts\python.exe"
+& $libraryPython -m pip install "build>=1.2,<2"
+& $libraryPython -m build --wheel
+```
+
+`python -m build` creates an isolated build environment and installs the build
+dependencies declared in `pyproject.toml`. It runs Cython on the `.py` modules,
+compiles them into `.pyd` files, and creates a wheel in `dist/`. Small
+`__init__.py` files remain as public facades; duplicate Python implementation
+modules are not included alongside their binaries in the wheel.
+Do not use `python setup.py install`.
+
+After building, replace the wheel filename below with the actual output filename:
+
+```powershell
+& $libraryPython -m pip install ".\dist\recursive_group_selection-0.4.0-cp313-cp313-win_amd64.whl[catboost,plot,report]"
+```
+
+Available extras are `catboost`, `xgboost`, `lightgbm`, `all`, `plot`, `report`,
+`notebook`, `test`, and `dev`.
+You do not need to install all three model libraries. A `.pyd` binary cannot be
+shared across all three operating systems. Compiling the orchestration code is
+not expected to substantially reduce training or SHAP computation costs.
+
+## Testing source without building or installing the package
+
+From the package directory, use an environment with NumPy, scikit-learn, pytest,
+pandas, matplotlib, and the backend you want to test. The commands below assume
+the local `.venv` created above; an existing compatible environment also works:
+
+```powershell
+$libraryPython = ".\.venv\Scripts\python.exe"
+$env:PYTHONPATH = (Resolve-Path ".\src").Path
+$env:PYTHONDONTWRITEBYTECODE = "1"
+& $libraryPython -m pytest tests -p no:cacheprovider
+```
+
+Tests for missing backends are skipped. Use `--require-all-backends` to require
+all three. Testing source does not invoke setup, Cython, or a compiler.
+To test an installed wheel, open a new terminal or remove the source directory
+from `PYTHONPATH`, run outside the checkout, and use:
+
+```powershell
+python -m pytest <path-to-tests> --require-compiled --require-all-backends
+```
+
+`--require-compiled` verifies that every implementation module is imported from
+a `.pyd` or `.so` file. The `__init__.py` facades may remain pure Python.
+
+## Building for three operating systems on GitHub Actions
+
+The standalone library workflow is
+`.github/workflows/build_group_selection.yml`.
+The workflow uses **only `workflow_dispatch`**. Builds start when a user selects
+Actions -> Build group-selection binary wheels -> Run workflow.
+There is no automatic PyPI publishing or release step.
+
+| Target | CPython | Wheel |
+| --- | --- | --- |
+| Windows x64 | 3.11, 3.12, 3.13 | win_amd64 |
+| Linux x86_64 | 3.11, 3.12, 3.13 | manylinux_2_28_x86_64 |
+| macOS Intel | 3.11, 3.12, 3.13 | macosx x86_64 |
+| macOS Apple Silicon | 3.11, 3.12, 3.13 | macosx arm64 |
+
+`cibuildwheel` builds wheels and tests installed copies on each runner and
+architecture. CI requires all three backends and runs the integration tests.
+The macOS test setup includes the OpenMP runtime `libomp` for dependencies that
+need it. macOS users may also need to install this runtime according to their
+backend's instructions.
+
+Wheels are available in Actions artifacts, grouped by target. The runtime ABI,
+Python version, and CPU architecture must match the wheel. A workflow definition
+alone does not establish verified platform support.
+
+## Paired cluster bootstrap of fixed-model predictions
+
+```python
+from recursive_group_selection.evaluation import PairedClusterBootstrap
+
+bootstrap = PairedClusterBootstrap(
+    n_resamples=50_000, confidence_level=0.90, random_state=42, batch_size=1_000,
+)
+comparison = bootstrap.compare(
+    y_true=y_test,
+    reference_predictions=full_predictions,
+    candidate_predictions=selected_predictions,
+    cluster_ids=recording_ids,
+    strata=y_test,
+)
+print(comparison.observed_difference_pp)
+print(comparison.lower_bound_pp)
+comparison.save("evaluation")
+decision = comparison.noninferiority(margin=0.04)
+print(decision.passed)
+```
+
+The metric in version 0.4.0 is F1 macro with a fixed class set. Differences are
+always candidate minus reference. Score units are 0 to 1; properties ending in
+`_pp` use percentage points. The confidence bound is the empirical lower
+quantile at `1 - confidence_level`, using linear interpolation. This percentile
+bound is approximate; it is not a bootstrap-tail p-value. With a 90% one-sided
+bound, the associated nominal significance level is 10%.
+
+Every cluster is resampled as a whole with shared weights for the two prediction
+vectors. Cluster IDs may be strings or numbers. If strata are supplied, a cluster
+must belong to exactly one stratum and each stratum must contain at least two
+clusters. `strata=y_test` therefore requires class-pure clusters. Omitting strata
+uses an unstratified cluster bootstrap, including mixed-class clusters.
+The number of clusters drawn is fixed within each stratum; the number of rows
+in a replicate can vary with cluster size. Resampling uses sorted cluster and
+stratum order. Reproduce the seed, batch size, input order and software versions
+when comparing exact replicate arrays.
+
+For non-inferiority, define the margin before inspecting evaluation results.
+`margin=0.04` means four percentage points. The decision rejects
+`H0: delta <= -margin` only when the one-sided lower bound is strictly greater
+than `-margin`. Failure to reject does not prove inferiority. Interpretation
+depends on the cluster/stratum definitions and independence of the evaluation
+protocol. No evaluation result feeds back into selection or refits either model.
+
+`save()` writes `bootstrap_comparison.json` and `bootstrap_differences.csv`.
+It overwrites those report filenames when called again in the same directory.
+
+## Optional plots of the recorded search
+
+Install the `[plot]` extra for Matplotlib. Importing the selector or the plotting
+namespace does not load Matplotlib; drawing a chart does.
+
+```python
+from recursive_group_selection.plotting import (
+    plot_importance_evolution, plot_retry_history,
+)
+
+fig, ax = plot_importance_evolution(
+    selector.result_, title="Feature-group importance through accepted configurations",
+    group_labels={1: "Channel A", 2: "Channel B"},
+)
+fig.savefig("importance.png", dpi=300, bbox_inches="tight")
+
+fig, axes = plot_retry_history(selector.result_)
+fig.savefig("retries.png", dpi=300, bbox_inches="tight")
+```
+
+Both functions return Figure/Axes without calling `show()` or saving files.
+They read recorded history only, without training or recomputing explanations.
+The importance heatmap shares one scale across accepted configurations; removed
+groups are NaN, not zero, and an x marks the first configuration after removal.
+Use `value_label` to identify SHAP or a custom ranker's importance units.
+The retry chart includes groups rejected before a later accepted removal; an
+empty retry history produces an informative empty chart. Its margins come from
+the recorded quality-policy decisions, in percentage points.
+
+All report charts are available from the same optional plotting namespace:
+
+| Function | Input |
+| --- | --- |
+| `plot_group_importance` | Recorded group-ID-to-importance mapping |
+| `plot_accepted_scores` | Selection result with accepted configurations and fixed floors |
+| `plot_confusion_matrix` | True labels and existing predictions |
+| `plot_processing_times` | Existing feature-extraction and inference times in seconds |
+| `plot_metric_comparison` | Two sets of scores on the 0-to-1 scale and metric labels |
+| `plot_selection_mask` | Caller-defined rectangular group-by-feature boolean mask |
+| `plot_importance_evolution` | Recorded importance snapshots from a selection result |
+| `plot_retry_history` | Recorded trial decisions from a selection result |
+| `plot_bootstrap_distribution` | Existing `BootstrapComparison` result |
+
+Every function returns Figure/Axes and leaves display and file saving to the
+caller. None calls a model, recomputes attributions, reruns selection, or draws
+additional bootstrap samples. Timing charts keep inference segments at their
+actual measured heights even when they are much smaller than extraction times.
+The bootstrap histogram handles constant replicate values and labels tied values
+as at/below the bound rather than claiming that exactly ten percent lie below it.
+
+```python
+from recursive_group_selection.plotting import plot_bootstrap_distribution
+
+fig, ax = plot_bootstrap_distribution(
+    comparison,
+    title="Bootstrap distribution of F1 macro change",
+    difference_label="F1 macro difference: candidate minus reference (percentage points)",
+)
+fig.savefig("bootstrap.png", dpi=300, bbox_inches="tight")
+```
+
+## Migration from 0.1.0
+
+Version 0.4.0 uses the distribution `recursive-group-selection`, import namespace
+`recursive_group_selection`, and class `RecursiveGroupSelector`. The former
+`shm-sensor-selection` distribution and `sensor_selection` import are not aliases
+of the new package. Existing installations can coexist because the namespaces differ.
+Use `feature_groups`, `min_groups`, and `selected_group_ids_` in new code.
+The selection loader accepts version-1 native model/JSON exports and translates
+their sensor field names to group field names. New exports use format version 2.
+The legacy project directory has been removed. The maintained library source is
+this standalone project root; saved version-1 model bundles remain loadable
+without installing the retired package.
+
+## References
+
+- [Cython compilation](https://docs.cython.org/en/latest/src/userguide/source_files_and_compilation.html)
+- [Python wheel formats](https://packaging.python.org/en/latest/discussions/package-formats/)
+- [cibuildwheel](https://cibuildwheel.pypa.io/en/stable/)
+- [XGBoost Python API](https://xgboost.readthedocs.io/en/stable/python/python_api.html)
+- [LightGBM Python API](https://lightgbm.readthedocs.io/en/stable/pythonapi/lightgbm.LGBMClassifier.html)
+- [SciPy bootstrap conventions and one-sided confidence intervals](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.bootstrap.html)
+
+
+## Reports, fixed-model evaluation and benchmarks (0.4.0)
+
+These APIs consume records or already fitted models; they never refit a model or
+change selection decisions. Install `[report]` for pandas tables, `[plot]` for
+Matplotlib, or `[notebook]` for pandas, plotting and the optional IPython recorder.
+Core selector/bootstrap do not require pandas, Matplotlib or IPython. Scikit-learn
+may import pandas transitively when it is already installed; report construction
+is the only part of this library that directly requests pandas.
+
+```python
+from recursive_group_selection.reporting import SelectionReport, style_metrics
+from recursive_group_selection.evaluation import (
+    evaluate_classifier, compare_evaluations, audit_selection,
+)
+from recursive_group_selection.benchmarking import ProcessingBenchmark, collect_environment
+
+report = SelectionReport(selector.result_, feature_groups=feature_groups)
+display(report.style("trials"))
+display(report.summary)
+report.save("reports/selection", prefix="example")
+
+full_eval = evaluate_classifier(
+    model=selector.full_model_, adapter=selector.adapter_,
+    splits={"Validation": (X_val, y_val), "Test": (X_test, y_test)},
+)
+selected_eval = evaluate_classifier(
+    model=selector.estimator_, adapter=selector.adapter_,
+    splits={"Validation": (selector.transform(X_val), y_val),
+            "Test": (selector.transform(X_test), y_test)},
+)
+comparison = compare_evaluations(reference=full_eval, candidate=selected_eval)
+display(style_metrics(comparison.class_metrics("Validation")))
+display(style_metrics(comparison.validation_constraints(
+    policy=selector.quality_policy, baseline=selector.baseline_metrics_,
+)))
+audit = audit_selection(selector.result_, feature_groups=feature_groups,
+                        quality_policy=selector.quality_policy, min_groups=selector.min_groups)
+display(audit.checks)
+audit.save("reports/audit", prefix="example")
+```
+
+Evaluation caches label predictions, probabilities, per-class metrics and text
+reports. All model classes contribute to macro averages (`zero_division=0`),
+including classes absent from a split. Probability columns must follow the
+adapter's class order; log loss is aligned even when those labels are unsorted.
+Custom adapters need `predict_proba(model, X)` only when probabilities are requested.
+Use `include_probabilities=False` for label-only classifiers (log loss is unavailable).
+The separate `ClassificationPredictor` protocol does not expand selector requirements.
+Comparisons require identical split order, classes and ordered true labels. The
+caller must ensure actual row identity; equal labels alone do not prove alignment.
+
+```python
+benchmark = ProcessingBenchmark.from_evaluations(
+    reference=full_eval, candidate=selected_eval,
+    reference_feature_times={"Validation": full_val_feature_seconds, "Test": full_test_feature_seconds},
+    candidate_feature_times={"Validation": selected_val_feature_seconds, "Test": selected_test_feature_seconds},
+    reference_groups=len(feature_groups), candidate_groups=len(selector.selected_group_ids_),
+)
+environment = collect_environment(packages=("catboost", "numpy", "recursive-group-selection"),
+                                  inference_device="CPU", inference_threads="Model default")
+benchmark.save("reports/benchmark", prefix="example", environment=environment)
+```
+
+Aggregation makes **no extra predictions**. Its timings describe one recorded
+label-prediction call per split, with zero warmup. Probability prediction, scoring,
+rendering and environment collection are outside the inference timer. Feature
+extraction/preprocessing durations are supplied by the application; the library
+does not know how raw time series become features. Batch averages are not request
+latency. For explicit repeated measurements use
+`benchmark_prediction(predict_callable, X, repeats=10, warmup=2)`; this is separate
+from single-run aggregation and reports every measurement plus the median.
+
+Reports support unequal-size/noncontiguous groups. `unit_name="sensor"` and optional
+`group_labels` affect presentation, not IDs or model input order. `SelectionReport`
+contains `trials`, `accepted_states`, `initial_ranking`, `final_ranking`,
+`importance_history`, `importance_matrix`, `retry_evidence`, `group_summary`,
+`selection_costs` and `summary`. All tables are built from detached records.
+Report saves default to refusing collisions. Opt into `overwrite=True` for reruns;
+unrelated files are retained. Per-report JSON manifests list filenames and SHA256
+hashes. The report exporter does not provide a multi-file transaction.
+`selector.save(new_empty_directory)` remains the native model/schema persistence
+API; `SelectionReport.save` exports tables and metadata, not a loadable estimator.
+
+`NotebookSelectionRecorder` is available under `integrations.notebook`. Construct
+it in the initial-importance section and pass it as `recorder` to selection below;
+its display handles keep the initial ranking/chart in the original notebook position.
+It observes copied events and never fits, ranks or makes acceptance decisions.
+
+`BootstrapReport` under `reporting` validates bootstrap scores against cached
+full/selected evaluations and writes optional compatibility CSV/summary and an
+explicit non-inferiority decision. Pass `margin` in score units, e.g. `0.04`.
+The existing `BootstrapComparison.save` and plotting APIs remain unchanged.
+Audits replay the recorded greedy rules, larger-ID importance ties and rejection
+reset, including minimum-group stopping and no-removal runs. They do not establish
+data provenance, independence or a global minimum.
