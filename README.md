@@ -32,14 +32,29 @@ For **Windows x64 and CPython 3.13**, install the following into the Python
 environment used by your application or notebook:
 
 ```powershell
-python -m pip install "recursive-selection[catboost,plot,report] @ https://github.com/tranvanphuongdevdream-web/recursive-selection/releases/download/v1.0.0/recursive_selection-1.0.0-cp313-cp313-win_amd64.whl"
+$libraryPython = "python"
+$release = Invoke-RestMethod -Uri "https://api.github.com/repos/tranvanphuongdevdream-web/recursive-selection/releases/latest" -ErrorAction Stop
+$wheel = @($release.assets | Where-Object { $_.name -match '^recursive_selection-.+-cp313-cp313-win_amd64\.whl$' })
+if ($wheel.Count -ne 1) { throw "The latest Release has no unique recursive-selection wheel for CPython 3.13 / Windows x64. Wait for CI publication or check GitHub Releases." }
+& $libraryPython -m pip install --upgrade --no-compile "recursive-selection[catboost,plot,report] @ $($wheel[0].browser_download_url)"
+if ($LASTEXITCODE -ne 0) { throw "Installing the latest library wheel failed." }
 ```
+
+The command resolves the latest published GitHub Release on every invocation,
+selects its CPython 3.13 / Windows x64 wheel, and passes that exact URL to
+`pip install --upgrade`. It stops if the latest Release has no matching wheel.
+The old 0.4.x/0.5.x assets do not match the renamed distribution. Rerun the
+same command to upgrade after future Releases; restart any notebook kernel
+that has loaded the binary. GitHub API availability/rate limits apply. For a
+reproducible experiment, record the installed version or use a specific
+Release's wheel URL instead.
 
 This installs the compiled library, its core dependencies, and the optional
 CatBoost, plotting, and reporting dependencies. No C++ compiler or Git is
 required to install this wheel. For another supported Python version or platform,
-copy the matching wheel's download link from the Release and replace the URL in
-the command. Select the wheel by all three properties:
+copy the matching wheel's download link from the Release and pass it to
+`python -m pip install --upgrade "recursive-selection[catboost,plot,report] @ WHEEL_URL"`.
+Select the wheel by all three properties:
 
 | Property | Wheel filename tag |
 | --- | --- |

@@ -179,6 +179,9 @@ def test_bad_or_incomplete_artifacts_never_pass(repository, tmp_path, problem):
     elif problem == "version":
         first.rename(first.with_name(first.name.replace("0.5.0", "0.5.1")))
     elif problem == "abi":
+        # Directory iteration order differs between filesystems. Select the
+        # interpreter we intend to corrupt instead of assuming it comes first.
+        first = next(directory.glob("*-cp311-cp311-*.whl"))
         first.rename(first.with_name(first.name.replace("-cp311-cp311-", "-cp311-abi3-")))
     elif problem == "module":
         (root / "src/recursive_selection/extra.py").write_text("# additional implementation\n")
