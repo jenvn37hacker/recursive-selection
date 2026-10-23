@@ -4,6 +4,7 @@ from hashlib import sha256
 import importlib.util
 from pathlib import Path
 import subprocess
+import tomllib
 from zipfile import ZipFile
 
 import pytest
@@ -39,7 +40,8 @@ def repository(tmp_path, monkeypatch):
         command(root, "config", "user.email", "test@example.invalid")
         command(root, "remote", "add", "origin", "https://github.com/example/release-test.git")
         config = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        config = config.replace('version = "0.5.0"', f'version = "{tagged}"', 1)
+        checked_out_version = tomllib.loads(config)["project"]["version"]
+        config = config.replace(f'version = "{checked_out_version}"', f'version = "{tagged}"', 1)
         (root / "pyproject.toml").write_text(config, encoding="utf-8")
         package = root / "src/recursive_group_selection"
         package.mkdir(parents=True)
@@ -80,6 +82,19 @@ def test_highest_change_wins(repository):
     commit(root, "fix: repair an edge case")
     commit(root, "feat: support another adapter")
     assert release.plan_release(root)["version"] == "0.6.0"
+
+
+def test_fixtures_still_work_after_ci_updates_the_checkout_version(repository, tmp_path, monkeypatch):
+    config = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    current = tomllib.loads(config)["project"]["version"]
+    shadow = tmp_path / "future-checkout"
+    shadow.mkdir()
+    (shadow / "pyproject.toml").write_text(
+        config.replace(f'version = "{current}"', 'version = "1.9.0"', 1), encoding="utf-8")
+    monkeypatch.setitem(globals(), "ROOT", shadow)
+    root = repository()
+    commit(root, "fix: verify releases after another version bump")
+    assert release.plan_release(root)["version"] == "0.5.1"
 
 
 def test_bootstrap_stamps_current_source_and_recovers_without_another_bump(repository):
