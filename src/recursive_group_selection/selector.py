@@ -1,4 +1,4 @@
-"""Sequential, validation-constrained elimination of complete feature groups."""
+"""Shared recursive elimination engine with group and individual-feature APIs."""
 from copy import deepcopy
 from numbers import Integral
 from time import perf_counter
@@ -11,11 +11,10 @@ from .policies import MacroQualityPolicy
 from .results import AcceptedState, MacroScores, SelectionResult, ShapSnapshot, TrialRecord
 
 
-class RecursiveGroupSelector:
-    """Select feature groups with fresh refits and configuration-specific retries.
+class _RecursiveSelectorBase:
+    """Coordinate refits and configuration-specific retries for selection units."""
 
-    Supply a model_adapter explicitly. Test data must not be passed as eval_set.
-    """
+    _selection_mode = "group"
 
     def __init__(self, *, model_adapter, ranker=None,
                  quality_policy=None, min_groups=1, recorder=None):
@@ -54,7 +53,7 @@ class RecursiveGroupSelector:
             raise ValueError("Candidate model classes/order differ from the full model.")
         return classes
 
-    def fit(self, X_train, y_train, *, eval_set, feature_groups, feature_names=None, full_model=None):
+    def _fit(self, X_train, y_train, *, eval_set, feature_groups, feature_names=None, full_model=None):
         """Fit the entire search. Existing estimators/inputs are never retrained in place.
 
         feature_names is optional for arrays and inferred for named DataFrames.
@@ -75,8 +74,12 @@ class RecursiveGroupSelector:
             raise ValueError("eval_set must be the pair (X_val, y_val).")
         X_val = numeric_matrix(eval_set[0], name="X_val", n_features=X.shape[1], feature_names=names)
         y_val = labels(eval_set[1], name="y_val", n_samples=len(X_val))
+        if feature_groups is None:
+            feature_groups = {column + 1: [column] for column in range(X.shape[1])}
         groups = FeatureGroups(feature_groups, X.shape[1])
         if self.min_groups > len(groups.group_ids):
+            if self._selection_mode == "feature":
+                raise ValueError("min_features exceeds the number of input features.")
             raise ValueError("min_groups exceeds the number of supplied feature groups.")
         train_classes = np.unique(y)
         if len(train_classes) < 2 or not np.isin(y_val, train_classes).all():
@@ -242,4 +245,61 @@ class RecursiveGroupSelector:
     @classmethod
     def load(cls, directory):
         from .persistence import load_selector
-        return load_selector(directory)
+        selector = load_selector(directory)
+        if selector._selection_mode != cls._selection_mode:
+            raise ValueError(f"Saved selection uses {selector._selection_mode} mode; load with {type(selector).__name__}.")
+        return selector
+
+
+class RecursiveGroupSelector(_RecursiveSelectorBase):
+    """Select complete feature groups with fresh refits and reject/retry.
+
+    Supply a model_adapter explicitly and a partition of columns to fit().
+    min_groups counts groups, even when they contain different numbers of columns.
+    Test data must not be passed as eval_set.
+    """
+
+    def fit(self, X_train, y_train, *, eval_set, feature_groups, feature_names=None, full_model=None):
+        """Select groups; preserve the original column order within each refit.
+
+        feature_names is inferred for DataFrames. An optional full_model must be
+        fitted using the same input schema, parameters and training protocol.
+        """
+        if feature_groups is None:
+            self._is_fitted = False
+            raise ValueError("Supply feature_groups, or use RecursiveFeatureSelector for individual columns.")
+        return self._fit(X_train, y_train, eval_set=eval_set, feature_groups=feature_groups,
+                         feature_names=feature_names, full_model=full_model)
+
+
+class RecursiveFeatureSelector(_RecursiveSelectorBase):
+    """Select individual columns with the same refit and reject/retry algorithm.
+
+    Each original column is a singleton group internally: group ID = column + 1.
+    selected_columns_ contains zero-based original indices. Group-based history,
+    reports, plotting and audits retain their existing schema. This convenience
+    API changes selection granularity; it does not implement Probatus ShapRFECV.
+    """
+
+    _selection_mode = "feature"
+
+    def __init__(self, *, model_adapter, ranker=None, quality_policy=None,
+                 min_features=1, recorder=None):
+        if isinstance(min_features, bool) or not isinstance(min_features, Integral) or min_features < 1:
+            raise ValueError("min_features must be a positive integer.")
+        super().__init__(model_adapter=model_adapter, ranker=ranker,
+                         quality_policy=quality_policy, min_groups=min_features, recorder=recorder)
+
+    @property
+    def min_features(self):
+        """Minimum column count; identical to the shared singleton-group minimum."""
+        return self.min_groups
+
+    def fit(self, X_train, y_train, *, eval_set, feature_names=None, full_model=None):
+        """Select individual features without requiring a feature_groups mapping.
+
+        feature_names is inferred for DataFrames. full_model has the same reuse
+        requirements as in RecursiveGroupSelector.fit().
+        """
+        return self._fit(X_train, y_train, eval_set=eval_set, feature_groups=None,
+                         feature_names=feature_names, full_model=full_model)

@@ -21,18 +21,25 @@ def _values(values, name, n=None, score=False):
 
 def plot_group_importance(importance, *, title=None, group_labels=None, total_groups=None,
                           unit_name="group", value_label="Mean absolute importance",
-                          figsize=(16, 6), ax=None):
+                          figsize=(16, 6), ax=None, top_n=None):
     """Plot a recorded ranking supplied as an ID-to-importance mapping."""
     from matplotlib.patches import Patch
     items = sorted(importance.items(), key=lambda item: -item[1])
     if not items:
         raise ValueError("An importance mapping with at least one group is required.")
     values = _values([value for _, value in items], "importance")
+    retained_count = len(items)
+    if top_n is not None:
+        if isinstance(top_n, bool) or not isinstance(top_n, (int, np.integer)) or top_n < 1:
+            raise ValueError("top_n must be a positive integer or None.")
+        items, values = items[:top_n], values[:top_n]
     labels = group_labels or {}
     fig, ax = _axes(ax, figsize)
     bars = ax.bar([labels.get(group, str(group)) for group, _ in items], values, color="#2563eb")
     ax.bar_label(bars, fmt="%.4f", padding=3, fontsize=8)
-    suffix = f"{len(items)}/{total_groups} {unit_name}s retained" if total_groups is not None else f"{len(items)} {unit_name}s retained"
+    suffix = f"{retained_count}/{total_groups} {unit_name}s retained" if total_groups is not None else f"{retained_count} {unit_name}s retained"
+    if len(items) < retained_count:
+        suffix += f" | Showing top {len(items)}"
     ax.set_title((title or "Group Importance") + "\n" + suffix)
     ax.set_xlabel(unit_name.capitalize())
     ax.set_ylabel(value_label)

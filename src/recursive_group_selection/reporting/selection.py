@@ -13,11 +13,11 @@ METRIC_NAMES = {"precision_macro": "Precision macro", "recall_macro": "Recall ma
                 "f1_macro": "F1 macro"}
 
 
-def ranking_table(importance, rejected_ids=(), *, unit_name="group"):
+def ranking_table(importance, rejected_ids=(), *, unit_name="group", group_labels=None):
     import pandas as pd
     safe_name(unit_name)
     table = pd.DataFrame([
-        {f"{unit_name}_id": group, unit_name: f"{unit_name.title()} {group}", "importance": value}
+        {f"{unit_name}_id": group, unit_name: (group_labels or {}).get(group, f"{unit_name.title()} {group}"), "importance": value}
         for group, value in importance.items()
     ]).sort_values("importance", ascending=False, kind="stable").reset_index(drop=True)
     total = float(table["importance"].sum())
@@ -51,10 +51,12 @@ class SelectionReport:
             f"{plural} before", f"{plural} tried", "Features before", "Features tried",
             *METRIC_NAMES.values(), *[name + " change (pp)" for name in METRIC_NAMES.values()],
             "Train time (s)", "Validation prediction (s)", "Decision", "Failed metrics"]
+        # In feature mode the unit counts and physical feature counts coincide.
+        self.trial_columns = list(dict.fromkeys(self.trial_columns))
         rows = []
         for trial in result.history:
             row = {"Step": trial.trial_id, "Round": trial.configuration_id + 1,
-                   f"{singular} tried": f"{singular} {trial.group_id}", "Importance": trial.importance,
+                   f"{singular} tried": self.group_labels.get(trial.group_id, f"{singular} {trial.group_id}"), "Importance": trial.importance,
                    f"{plural} before": len(trial.groups_before), f"{plural} tried": len(trial.proposed_groups),
                    "Features before": len(self.groups.columns(trial.groups_before)),
                    "Features tried": len(self.groups.columns(trial.proposed_groups)),
@@ -75,8 +77,8 @@ class SelectionReport:
                   if t.configuration_id == result.accepted_history[-1].configuration_id and not t.accepted}
         self.rejected_group_ids = tuple(group for group in self.groups.group_ids if group in failed)
         self.attempted_group_ids = tuple(sorted({t.group_id for t in result.history}))
-        self.initial_ranking = ranking_table(dict(result.shap_history[0].importance), unit_name=unit_name)
-        self.final_ranking = ranking_table(dict(result.shap_history[-1].importance), failed, unit_name=unit_name)
+        self.initial_ranking = ranking_table(dict(result.shap_history[0].importance), unit_name=unit_name, group_labels=self.group_labels)
+        self.final_ranking = ranking_table(dict(result.shap_history[-1].importance), failed, unit_name=unit_name, group_labels=self.group_labels)
         self.importance_history = pd.DataFrame([
             {f"{unit_name}_id": group, "importance": value, "Step": snapshot.trial_id,
              plural: len(snapshot.group_ids)}

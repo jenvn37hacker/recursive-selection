@@ -61,7 +61,8 @@ def save_selector(selector, directory):
     if directory.exists() and any(directory.iterdir()):
         raise FileExistsError("Choose an empty/new directory; saved selections are not overwritten.")
     metadata = {
-        "format_version": 2, "package_version": __version__, "python_version": platform.python_version(),
+        "format_version": 3, "package_version": __version__, "python_version": platform.python_version(),
+        "selection_mode": selector._selection_mode,
         "backend": specification, "policy": selector.quality_policy.to_config(),
         "min_groups": selector.min_groups, "classes": selector.classes_.tolist(),
         "n_features_in": selector.n_features_in_, "feature_names": selector.feature_names_in_,
@@ -89,12 +90,15 @@ def save_selector(selector, directory):
 
 def load_selector(directory):
     from .groups import FeatureGroups
-    from .selector import RecursiveGroupSelector
+    from .selector import RecursiveFeatureSelector, RecursiveGroupSelector
     directory = Path(directory)
     data = _decode(json.loads((directory / "selection.json").read_text(encoding="utf-8")))
     data = _migrate_metadata(data)
-    if data["format_version"] != 2:
+    if data["format_version"] not in (2, 3):
         raise ValueError("Unsupported selection metadata version.")
+    mode = data.get("selection_mode", "group") if data["format_version"] == 2 else data.get("selection_mode")
+    if mode not in {"group", "feature"}:
+        raise ValueError("Unsupported saved selection mode.")
     adapter = adapter_from_specification(data["backend"])
     # Ignore arbitrary filesystem paths in metadata; use the backend's fixed filename.
     if data["model_file"] != adapter.model_filename:
@@ -104,6 +108,8 @@ def load_selector(directory):
         raise ValueError("Saved model hash differs from selection metadata.")
     model = adapter.load_model(model_path, data["classes"])
     groups = FeatureGroups({int(k): v for k, v in data["feature_groups"].items()}, data["n_features_in"])
+    if mode == "feature" and groups.as_dict() != {column + 1: [column] for column in range(data["n_features_in"])}:
+        raise ValueError("Saved feature selection must contain one singleton group per original column.")
     group_ids = tuple(data["selected_group_ids"])
     if (len(group_ids) != len(set(group_ids)) or not set(group_ids).issubset(groups.group_ids)
             or not group_ids or groups.columns(group_ids) != tuple(data["selected_columns"])):
@@ -131,8 +137,9 @@ def load_selector(directory):
                              MacroScores(**data["baseline_metrics"]), MacroScores(**data["effective_floors"]),
                              MacroScores(**data["final_metrics"]), tuple(history), accepted, snapshots,
                              data["timings"], data["stop_reason"])
-    selector = RecursiveGroupSelector(model_adapter=adapter, quality_policy=MacroQualityPolicy(**data["policy"]),
-                                       min_groups=data["min_groups"])
+    selector_class = RecursiveFeatureSelector if mode == "feature" else RecursiveGroupSelector
+    minimum = {"min_features" if mode == "feature" else "min_groups": data["min_groups"]}
+    selector = selector_class(model_adapter=adapter, quality_policy=MacroQualityPolicy(**data["policy"]), **minimum)
     selector.adapter_ = adapter
     # Only the final model is persisted. The original full model is not restored.
     selector.full_model_ = None

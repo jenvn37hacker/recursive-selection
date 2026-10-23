@@ -1,14 +1,47 @@
-# Recursive Group Selection
+# Recursive Feature and Group Selection
 
-A library for selecting **complete feature groups** through recursive elimination,
+A library for selecting **individual features or complete feature groups** through recursive elimination,
 refitting, validation checks, and configuration-specific retries. The library is
 independent of the Z24 and QUGS notebooks. The distribution name is
 `recursive-group-selection`; the import name is `recursive_group_selection`.
 The package has not been published on PyPI.
 
+The source version **0.5.0** adds `RecursiveFeatureSelector`. The published 0.4.0
+wheel below supports `RecursiveGroupSelector` only. Build and install the updated
+source to use the new API; no 0.5.0 release wheel is implied by this README.
+
+## Install from GitHub Releases
+
+The [v0.4.0 release](https://github.com/tranvanphuongdevdream-web/recursive_group_selection/releases/tag/v0.4.0)
+provides a prebuilt wheel for **64-bit Windows and CPython 3.13**. Install it
+in the Python environment used by your application or notebook:
+
+```powershell
+python -m pip install "recursive-group-selection[catboost,plot,report] @ https://github.com/tranvanphuongdevdream-web/recursive_group_selection/releases/download/v0.4.0/recursive_group_selection-0.4.0-cp313-cp313-win_amd64.whl"
+```
+
+This installs the compiled library, its core dependencies, and the optional
+CatBoost, plotting, and reporting dependencies. No C++ compiler or Git is
+required to install this wheel. Other Python versions and operating systems
+require a compatible wheel or a source build; this Windows wheel cannot be
+used on Linux or macOS.
+
+```python
+from recursive_group_selection import RecursiveGroupSelector, CatBoostAdapter
+```
+
+The source repository is
+[recursive_group_selection](https://github.com/tranvanphuongdevdream-web/recursive_group_selection).
+
 ## Design
 
-`RecursiveGroupSelector` uses composition rather than inheriting from CatBoost.
+Both selectors use composition rather than inheriting from CatBoost. They expose
+two APIs over one shared search engine; the feature API does not duplicate the loop.
+
+| API | Removal unit | Minimum | Group mapping |
+| --- | --- | --- | --- |
+| `RecursiveGroupSelector` | One complete feature group | `min_groups` | Required in `fit()` |
+| `RecursiveFeatureSelector` | One original column | `min_features` | Generated internally |
 
 | Component | Responsibility |
 | --- | --- |
@@ -29,11 +62,12 @@ This is a greedy search: the final configuration satisfies the thresholds, but
 the algorithm does not guarantee the globally smallest group set. When the stop
 reason is `all_candidates_rejected`, every attempt to remove **one** group from
 the final configuration has been rejected in that same configuration.
-`min_groups_reached` means that the user-defined minimum group count was reached.
+`min_groups_reached` means that the user-defined minimum unit count was reached.
+This shared history value also applies when `min_features` is reached in feature mode.
 
 ## Usage
 
-Version 0.4.0 requires an explicit `model_adapter`. Configure the model through
+Both APIs require an explicit `model_adapter`. Configure the model through
 adapter `params` and training through `fit_params`; there is no estimator input,
 automatic backend detection, or backend registration API.
 
@@ -65,6 +99,57 @@ selector.fit(X_train, y_train, eval_set=(X_val, y_val),
 model = selector.estimator_  # Fitted output model, expecting selected columns.
 predictions = selector.predict(X_test)  # Selector accepts the original full schema.
 ```
+
+For individual-column selection, use the same adapter and policy settings with
+`RecursiveFeatureSelector`. Do not supply `feature_groups`:
+
+```python
+from recursive_group_selection import RecursiveFeatureSelector
+
+feature_selector = RecursiveFeatureSelector(
+    model_adapter=selector.model_adapter,
+    quality_policy=selector.quality_policy,
+    min_features=1,
+)
+feature_selector.fit(
+    X_train, y_train,
+    eval_set=(X_val, y_val),
+    feature_names=feature_names,
+    # full_model=full_model,  # Optional existing full-schema fitted model.
+)
+indices = feature_selector.selected_columns_       # Zero-based original columns.
+names = feature_selector.selected_feature_names_  # Names, or None for unnamed arrays.
+model = feature_selector.estimator_
+predictions = feature_selector.predict(X_test)
+```
+
+Feature mode uses `{1: [0], 2: [1], ...}` internally. Its history IDs are one-based;
+`selected_columns_` is zero-based. `min_features` counts columns; `min_groups` in
+group mode counts groups even when their sizes differ. A feature can be removed
+while other features of the same sensor remain; use group mode to remove sensors
+as complete units. Neither minimum parameter guarantees the global optimum.
+
+Both APIs retain configuration-specific reject/retry, fixed validation floors,
+fresh model refits and SHAP updates after acceptance. Feature mode is not the
+Probatus `ShapRFECV` algorithm used in experiment 007 and does not add CV. Both
+selectors can use CatBoost, XGBoost, LightGBM or a custom model adapter.
+
+Reports, charts and audits consume the same result schema in either mode:
+
+```python
+from recursive_group_selection.reporting import SelectionReport
+from recursive_group_selection.plotting import plot_importance_evolution
+
+report = SelectionReport(
+    feature_selector.result_,
+    feature_groups=feature_selector.feature_groups_.as_dict(),
+    unit_name="feature",
+)
+fig, ax = plot_importance_evolution(feature_selector.result_, unit_name="feature")
+```
+
+Bootstrap comparison remains independent of selection granularity: pass the
+reference and selected models' aligned predictions to `PairedClusterBootstrap`.
 
 Choose `XGBoostAdapter(params=...)` or `LightGBMAdapter(params=...)` explicitly for
 other supported models. All adapters accept keyword configuration only. Set seeds,
@@ -147,12 +232,20 @@ Callback errors cause fitting to fail; they are not hidden as trial rejections.
 selector.save("my_selection")  # Requires a new or empty directory.
 restored = RecursiveGroupSelector.load("my_selection")
 predictions = restored.predict(X_test)
+
+feature_selector.save("my_feature_selection")
+restored_features = RecursiveFeatureSelector.load("my_feature_selection")
 ```
 
 The native model (`.cbm`/`.json`/`.txt`) is saved alongside `selection.json`, which
 contains the schema, policy, backend configuration, classes, history, timings, and
 model SHA-256 hash. Pickle is not used. Only the final model is saved;
 `full_model_` is `None` after loading.
+
+Version 0.5.0 writes metadata format 3 with the selection mode and restores the
+matching selector type. Load with the same public class that saved the selection.
+Existing metadata formats 1 and 2 remain readable as group selections. Older
+library versions cannot read format 3.
 
 After loading, LightGBM uses a native `Booster` in `estimator_`. Use
 `restored.predict(X_full)` to obtain class labels using the saved class mapping.
@@ -194,7 +287,7 @@ Do not use `python setup.py install`.
 After building, replace the wheel filename below with the actual output filename:
 
 ```powershell
-& $libraryPython -m pip install ".\dist\recursive_group_selection-0.4.0-cp313-cp313-win_amd64.whl[catboost,plot,report]"
+& $libraryPython -m pip install ".\dist\recursive_group_selection-0.5.0-cp313-cp313-win_amd64.whl[catboost,plot,report]"
 ```
 
 Available extras are `catboost`, `xgboost`, `lightgbm`, `all`, `plot`, `report`,

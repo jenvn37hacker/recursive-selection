@@ -90,6 +90,20 @@ def test_ranking_and_accepted_score_charts_use_recorded_values(selection_result)
     plt.close(fig)
 
 
+def test_top_importance_bars_preserve_full_count_and_names():
+    mpl = pytest.importorskip("matplotlib")
+    mpl.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, ax = plot_group_importance({1: .1, 2: .3, 3: .2}, top_n=2,
+        group_labels={1: "S1_mean", 2: "S1_std", 3: "S2_mean"}, total_groups=10, unit_name="feature")
+    assert [tick.get_text() for tick in ax.get_xticklabels()] == ["S1_std", "S2_mean"]
+    assert "3/10 features retained" in ax.get_title()
+    assert "Showing top 2" in ax.get_title()
+    plt.close(fig)
+    with pytest.raises(ValueError, match="top_n"):
+        plot_group_importance({1: .1}, top_n=0)
+
+
 def test_confusion_and_metric_comparison_match_supplied_data():
     mpl = pytest.importorskip("matplotlib")
     mpl.use("Agg")
