@@ -1,15 +1,73 @@
 name: Build group-selection binary wheels
 
-# Manual only: editing or pushing source does not automatically build a wheel.
 on:
+  push:
+    branches: [master]
   workflow_dispatch:
+
+# Serialize release preparation/build/publication. Superseded queued pushes skip.
+concurrency:
+  group: group-selection-master-release
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
+  automation-tests:
+    name: Test release automation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - run: python -m pip install "python-semantic-release==10.7.0" "pytest>=8,<10" packaging
+      - run: python -m pytest .github/tests -q -p no:cacheprovider
+
+  prepare:
+    name: Prepare version and source commit
+    needs: automation-tests
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      ref: ${{ steps.prepare.outputs.ref }}
+      version: ${{ steps.prepare.outputs.version }}
+      tag: ${{ steps.prepare.outputs.tag }}
+      release: ${{ steps.prepare.outputs.release }}
+      skip: ${{ steps.prepare.outputs.skip }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - run: python -m pip install "python-semantic-release==10.7.0" packaging
+      - name: Configure release commit identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Resolve version, commit and tag
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_EVENT: ${{ github.event_name }}
+          RELEASE_TRIGGER_SHA: ${{ github.sha }}
+        run: python .github/scripts/release.py prepare
+
   wheels:
     name: ${{ matrix.target }}
+    needs: prepare
+    if: needs.prepare.outputs.skip != 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -29,8 +87,11 @@ jobs:
             os: macos-15
             arch: arm64
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
       - name: Install wheel build driver
@@ -40,8 +101,52 @@ jobs:
         env:
           CIBW_ARCHS: ${{ matrix.arch }}
           CIBW_ENVIRONMENT: "OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1"
-      - uses: actions/upload-artifact@v7.0.2
+      - name: Upload tested wheels
+        id: upload
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: group-selection-${{ matrix.target }}
           path: wheelhouse/*.whl
           if-no-files-found: error
+      - name: Allow the artifact service to recover
+        if: steps.upload.outcome == 'failure'
+        run: python -c "import time; time.sleep(15)"
+      - name: Retry upload after a transient artifact-service failure
+        if: steps.upload.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: group-selection-${{ matrix.target }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+          overwrite: true
+
+  publish:
+    name: Publish all tested wheels to GitHub Release
+    needs: [prepare, wheels]
+    if: needs.prepare.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: group-selection-*
+          path: release-wheels
+          merge-multiple: true
+      - run: python -m pip install packaging
+      - name: Verify all platforms/ABIs, upload to a draft, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: python .github/scripts/release.py publish --directory release-wheels

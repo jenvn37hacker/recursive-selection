@@ -53,3 +53,26 @@ archs = ["AMD64"]
 
 [tool.cibuildwheel.macos]
 before-test = "brew list libomp >/dev/null 2>&1 || brew install libomp"
+
+[tool.semantic_release]
+commit_parser = "conventional"
+tag_format = "v{version}"
+allow_zero_version = true
+major_on_zero = true
+version_toml = ["pyproject.toml:project.version"]
+version_variables = ["src/recursive_group_selection/__init__.py:__version__"]
+commit_message = "chore(release): {version} [skip ci]"
+
+[tool.semantic_release.branches.master]
+match = "master"
+prerelease = false
+
+[tool.semantic_release.commit_parser_options]
+minor_tags = ["feat"]
+patch_tags = ["fix", "perf"]
+parse_squash_commits = true
+ignore_merge_commits = true
+
+[tool.release_pipeline]
+# One-time migration: source 0.5.0 follows the existing v0.4.0 tag.
+bootstrap_version = "0.5.0"

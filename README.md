@@ -6,9 +6,10 @@ independent of the Z24 and QUGS notebooks. The distribution name is
 `recursive-group-selection`; the import name is `recursive_group_selection`.
 The package has not been published on PyPI.
 
-The source version **0.5.0** adds `RecursiveFeatureSelector`. The published 0.4.0
-wheel below supports `RecursiveGroupSelector` only. Build and install the updated
-source to use the new API; no 0.5.0 release wheel is implied by this README.
+Version **0.5.0** introduced `RecursiveFeatureSelector`. The 0.4.0 wheel below is
+retained for older notebooks and supports `RecursiveGroupSelector` only. For the
+new API, build the source locally or choose a matching wheel from a newer GitHub
+Release. The automatic release process is documented below.
 
 ## Install from GitHub Releases
 
@@ -321,13 +322,45 @@ python -m pytest <path-to-tests> --require-compiled --require-all-backends
 `--require-compiled` verifies that every implementation module is imported from
 a `.pyd` or `.so` file. The `__init__.py` facades may remain pure Python.
 
-## Building for three operating systems on GitHub Actions
+## Automatic versions, binary wheels and GitHub Releases
 
-The standalone library workflow is
-`.github/workflows/build_group_selection.yml`.
-The workflow uses **only `workflow_dispatch`**. Builds start when a user selects
-Actions -> Build group-selection binary wheels -> Run workflow.
-There is no automatic PyPI publishing or release step.
+The workflow `.github/workflows/build_group_selection.yml` runs on pushes to
+`master` and can also be started with **Run workflow**. It plans versions using
+Python Semantic Release 10.7.0, builds native wheels, tests their installed
+copies, and publishes all platforms together to a GitHub Release. It does not
+publish to PyPI.
+
+Use Conventional Commit messages to describe the impact of changes:
+
+| Commit | Next version from 0.5.0 |
+| --- | --- |
+| `fix: correct a calculation` | 0.5.1 |
+| `perf: reduce prediction overhead` | 0.5.1 |
+| `feat: add a ranking method` | 0.6.0 |
+| `feat!: change the selector API` or a `BREAKING CHANGE:` footer | 1.0.0 |
+| `docs: update examples`, `chore: ...`, `ci: ...` | No new release |
+
+The highest-impact change since the last version tag determines the bump. A
+commit such as `update code` cannot communicate that impact and does not trigger
+a release. Non-release changes still build and test wheels. You do not manually
+edit version numbers or create tags for normal releases.
+
+The one-time bootstrap publishes source version **0.5.0** after the existing
+`v0.4.0` tag, including the previously untagged feature-selection API. From then
+on, CI updates `project.version` in `pyproject.toml` and `__version__` in the
+public package together, generates `CHANGELOG.md`, and pushes a release commit
+and tag. Release commits contain `[skip ci]` to prevent duplicate builds. Both
+version preparation and wheel publication happen in the same workflow: a tag
+created using `GITHUB_TOKEN` is not relied on to trigger another workflow.
+
+```text
+Conventional commit + push to master
+  -> plan/stamp version, changelog, release commit and tag
+  -> build/test the exact release commit on four native runners
+  -> verify all 12 wheels, CPython ABIs, metadata and compiled modules
+  -> upload wheels + SHA256SUMS to a draft release
+  -> publish only when every platform and upload succeeded
+```
 
 | Target | CPython | Wheel |
 | --- | --- | --- |
@@ -336,15 +369,52 @@ There is no automatic PyPI publishing or release step.
 | macOS Intel | 3.11, 3.12, 3.13 | macosx x86_64 |
 | macOS Apple Silicon | 3.11, 3.12, 3.13 | macosx arm64 |
 
-`cibuildwheel` builds wheels and tests installed copies on each runner and
-architecture. CI requires all three backends and runs the integration tests.
-The macOS test setup includes the OpenMP runtime `libomp` for dependencies that
-need it. macOS users may also need to install this runtime according to their
-backend's instructions.
+`cibuildwheel` requires all three model backends in its integration tests and
+checks that implementation modules come from `.pyd`/`.so`, not source. macOS
+backend tests install the OpenMP runtime `libomp` when needed. Backend users may
+also need this runtime according to their model library's instructions.
 
-Wheels are available in Actions artifacts, grouped by target. The runtime ABI,
-Python version, and CPU architecture must match the wheel. A workflow definition
-alone does not establish verified platform support.
+CI serializes releases, skips superseded queued pushes, and pins every build
+job to the prepared commit SHA. The version commit/tag is prepared before the
+platform builds, so a failed build can leave an unpublished version tag. Use
+**Re-run failed jobs** to retry those jobs, or **Run workflow** on `master` to
+retry its prepared release. Preparation recognizes an already-tagged release
+commit and reuses the same version. Artifact uploads get a second attempt for
+transient service failures. Incomplete uploads remain drafts. A complete public
+release is left unchanged on reruns; an incomplete public release fails rather
+than silently replacing published files. Existing releases are retained.
+
+The workflow uses GitHub's automatic `GITHUB_TOKEN`, with `contents: write`
+limited to version preparation and publication. No personal token is required
+for an ordinary unprotected `master` branch. Repository rules must permit the
+release bot to push its version commit/tag if branch/tag protection is enabled.
+
+CI pushes version/changelog commits back to `master`. Before starting the next
+change locally, fetch that commit:
+
+```powershell
+git pull --ff-only
+# Edit and test the library.
+git add <files-you-changed>
+git commit -m "fix: correct selection history"
+git push origin master
+```
+
+Wheels also remain downloadable as Actions artifacts. Choose a wheel matching
+the Python version, OS and CPU architecture, then install it with optional
+backend/report extras. The version tag and wheel filename must agree.
+
+For a local read-only version preview, install the release tooling in a developer
+environment and run:
+
+```powershell
+python -m pip install "python-semantic-release==10.7.0" packaging
+python .github/scripts/release.py plan
+```
+
+`plan` prints JSON without changing files, creating commits/tags, or publishing.
+The automation's tests run with `python -m pytest .github/tests`. Source tests
+and the Windows local build commands above remain available independently of CI.
 
 ## Paired cluster bootstrap of fixed-model predictions
 
