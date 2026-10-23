@@ -1,38 +1,65 @@
-# Recursive Feature and Group Selection
+# Recursive Selection
 
-A library for selecting **individual features or complete feature groups** through recursive elimination,
-refitting, validation checks, and configuration-specific retries. The library is
-independent of the Z24 and QUGS notebooks. The distribution name is
-`recursive-group-selection`; the import name is `recursive_group_selection`.
-The package has not been published on PyPI.
+A Python library for selecting **individual features or complete feature groups**
+through SHAP-guided recursive elimination, fresh model refits, fixed validation
+thresholds, and configuration-specific retries. Use it to select whole sensors,
+channels, or other groups of related columns, or to select individual columns.
+It supports numeric classification data with CatBoost, XGBoost, LightGBM, or a
+custom model adapter.
 
-Version **0.5.0** introduced `RecursiveFeatureSelector`. The 0.4.0 wheel below is
-retained for older notebooks and supports `RecursiveGroupSelector` only. For the
-new API, build the source locally or choose a matching wheel from a newer GitHub
-Release. The automatic release process is documented below.
+| Selection mode | Public class | Example |
+| --- | --- | --- |
+| Group selection | `RecursiveGroupSelector` | Remove a sensor and all its extracted statistics together |
+| Feature selection | `RecursiveFeatureSelector` | Remove one statistic while retaining other features from that sensor |
+
+The GitHub repository is
+[`recursive-selection`](https://github.com/tranvanphuongdevdream-web/recursive-selection).
+The installable distribution remains `recursive-group-selection` and the Python
+import remains `recursive_group_selection`; the repository rename does not require
+changes to existing notebook imports. The library is independent of the Z24 and
+QUGS research notebooks and is not published on PyPI.
 
 ## Install from GitHub Releases
 
-The [v0.4.0 release](https://github.com/tranvanphuongdevdream-web/recursive_group_selection/releases/tag/v0.4.0)
-provides a prebuilt wheel for **64-bit Windows and CPython 3.13**. Install it
-in the Python environment used by your application or notebook:
+The [v0.5.0 release](https://github.com/tranvanphuongdevdream-web/recursive-selection/releases/tag/v0.5.0)
+provides both selection modes and **12 compiled wheels** for CPython 3.11, 3.12,
+and 3.13 on Windows x64, Linux x86_64, macOS Intel, and macOS Apple Silicon.
+For newer versions, see [GitHub Releases](https://github.com/tranvanphuongdevdream-web/recursive-selection/releases).
+
+For **Windows x64 and CPython 3.13**, install the following into the Python
+environment used by your application or notebook:
 
 ```powershell
-python -m pip install "recursive-group-selection[catboost,plot,report] @ https://github.com/tranvanphuongdevdream-web/recursive_group_selection/releases/download/v0.4.0/recursive_group_selection-0.4.0-cp313-cp313-win_amd64.whl"
+python -m pip install "recursive-group-selection[catboost,plot,report] @ https://github.com/tranvanphuongdevdream-web/recursive-selection/releases/download/v0.5.0/recursive_group_selection-0.5.0-cp313-cp313-win_amd64.whl"
 ```
 
 This installs the compiled library, its core dependencies, and the optional
 CatBoost, plotting, and reporting dependencies. No C++ compiler or Git is
-required to install this wheel. Other Python versions and operating systems
-require a compatible wheel or a source build; this Windows wheel cannot be
-used on Linux or macOS.
+required to install this wheel. For another supported Python version or platform,
+copy the matching wheel's download link from the Release and replace the URL in
+the command. Select the wheel by all three properties:
+
+| Property | Wheel filename tag |
+| --- | --- |
+| CPython 3.11 / 3.12 / 3.13 | `cp311` / `cp312` / `cp313` |
+| Windows x64 | `win_amd64` |
+| Linux x86_64 | `manylinux...x86_64` |
+| macOS Intel | `macosx...x86_64` |
+| macOS Apple Silicon | `macosx...arm64` |
+
+The Release also includes `SHA256SUMS`. The historical
+[v0.4.0 release](https://github.com/tranvanphuongdevdream-web/recursive-selection/releases/tag/v0.4.0)
+remains available for applications pinned to the group-only API.
 
 ```python
-from recursive_group_selection import RecursiveGroupSelector, CatBoostAdapter
+from recursive_group_selection import (
+    RecursiveGroupSelector, RecursiveFeatureSelector, CatBoostAdapter,
+)
 ```
 
-The source repository is
-[recursive_group_selection](https://github.com/tranvanphuongdevdream-web/recursive_group_selection).
+Repository names, distribution names, and import names are separate: clone
+`recursive-selection`, install `recursive-group-selection`, and import
+`recursive_group_selection`.
 
 ## Design
 
@@ -131,9 +158,11 @@ while other features of the same sensor remain; use group mode to remove sensors
 as complete units. Neither minimum parameter guarantees the global optimum.
 
 Both APIs retain configuration-specific reject/retry, fixed validation floors,
-fresh model refits and SHAP updates after acceptance. Feature mode is not the
-Probatus `ShapRFECV` algorithm used in experiment 007 and does not add CV. Both
-selectors can use CatBoost, XGBoost, LightGBM or a custom model adapter.
+fresh model refits and SHAP updates after acceptance. A rejected removal keeps
+the current model and ranking; after another removal is accepted, previously
+rejected candidates may be tried again in the new configuration. Feature mode
+uses this same search and does not add cross-validation. Both selectors can use
+CatBoost, XGBoost, LightGBM or a custom model adapter.
 
 Reports, charts and audits consume the same result schema in either mode:
 
@@ -268,10 +297,11 @@ The search loop calls these contracts without branching on library names.
 
 You can read, edit, and test the source without building it. To build binaries,
 use 64-bit CPython 3.11, 3.12, or 3.13 and MSVC C++ Build Tools compatible with
-that Python version. Run the following from this standalone library directory
-(currently `C:\Users\phuotran\Data\research\recursive_group_selection`):
+that Python version. Clone the repository, then run from its root directory:
 
 ```powershell
+git clone https://github.com/tranvanphuongdevdream-web/recursive-selection.git
+Set-Location -LiteralPath ".\recursive-selection"
 py -3.13 -m venv .venv
 $libraryPython = ".\.venv\Scripts\python.exe"
 & $libraryPython -m pip install "build>=1.2,<2"
@@ -377,9 +407,10 @@ also need this runtime according to their model library's instructions.
 CI serializes releases, skips superseded queued pushes, and pins every build
 job to the prepared commit SHA. The version commit/tag is prepared before the
 platform builds, so a failed build can leave an unpublished version tag. Use
-**Re-run failed jobs** to retry those jobs, or **Run workflow** on `master` to
-retry its prepared release. Preparation recognizes an already-tagged release
-commit and reuses the same version. Artifact uploads get a second attempt for
+**Re-run failed jobs** on the original run to retry those jobs with its prepared
+commit. **Run workflow** on `master` can also retry if `master` still points to
+that tagged release commit. Preparation recognizes the tag and reuses the same
+version. Artifact uploads get a second attempt for
 transient service failures. Incomplete uploads remain drafts. A complete public
 release is left unchanged on reruns; an incomplete public release fails rather
 than silently replacing published files. Existing releases are retained.
@@ -438,7 +469,7 @@ decision = comparison.noninferiority(margin=0.04)
 print(decision.passed)
 ```
 
-The metric in version 0.4.0 is F1 macro with a fixed class set. Differences are
+The comparison metric is F1 macro with a fixed class set. Differences are
 always candidate minus reference. Score units are 0 to 1; properties ending in
 `_pp` use percentage points. The confidence bound is the empirical lower
 quantile at `1 - confidence_level`, using linear interpolation. This percentile
@@ -534,7 +565,8 @@ Version 0.4.0 uses the distribution `recursive-group-selection`, import namespac
 of the new package. Existing installations can coexist because the namespaces differ.
 Use `feature_groups`, `min_groups`, and `selected_group_ids_` in new code.
 The selection loader accepts version-1 native model/JSON exports and translates
-their sensor field names to group field names. New exports use format version 2.
+their sensor field names to group field names. Version 0.4.0 writes metadata
+format 2; version 0.5.0 writes format 3 for both selection modes.
 The legacy project directory has been removed. The maintained library source is
 this standalone project root; saved version-1 model bundles remain loadable
 without installing the retired package.

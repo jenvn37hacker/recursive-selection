@@ -19,6 +19,13 @@ classifiers = [
   "Operating System :: MacOS",
 ]
 
+[project.urls]
+Homepage = "https://github.com/tranvanphuongdevdream-web/recursive-selection"
+Repository = "https://github.com/tranvanphuongdevdream-web/recursive-selection"
+Documentation = "https://github.com/tranvanphuongdevdream-web/recursive-selection#readme"
+Issues = "https://github.com/tranvanphuongdevdream-web/recursive-selection/issues"
+Changelog = "https://github.com/tranvanphuongdevdream-web/recursive-selection/blob/master/CHANGELOG.md"
+
 [project.optional-dependencies]
 catboost = ["catboost>=1.2.8,<2"]
 xgboost = ["xgboost>=2.1,<4"]

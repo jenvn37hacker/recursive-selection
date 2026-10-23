@@ -1,4 +1,4 @@
-name: Build group-selection binary wheels
+name: Build recursive-selection binary wheels
 
 on:
   push:
