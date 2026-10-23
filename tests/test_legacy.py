@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from pathlib import Path
 
-from recursive_group_selection import RecursiveGroupSelector
+from recursive_selection import RecursiveGroupSelector
 
 
 def test_read_version_one_native_selection(tmp_path):

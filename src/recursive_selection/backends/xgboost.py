@@ -13,7 +13,7 @@ class XGBoostAdapter(BaseModelAdapter):
         try:
             from xgboost import XGBClassifier
         except ImportError as exc:
-            raise ImportError('Install recursive-group-selection[xgboost] to use this backend.') from exc
+            raise ImportError('Install recursive-selection[xgboost] to use this backend.') from exc
         return XGBClassifier
 
     def fit(self, model, X, y, eval_set):

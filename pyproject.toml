@@ -3,7 +3,7 @@ requires = ["setuptools>=77", "wheel", "Cython>=3.1,<4"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "recursive-group-selection"
+name = "recursive-selection"
 version = "0.5.0"
 description = "Validation-constrained recursive feature and feature-group selection with paired bootstrap evaluation"
 readme = "README.md"
@@ -67,7 +67,7 @@ tag_format = "v{version}"
 allow_zero_version = true
 major_on_zero = true
 version_toml = ["pyproject.toml:project.version"]
-version_variables = ["src/recursive_group_selection/__init__.py:__version__"]
+version_variables = ["src/recursive_selection/__init__.py:__version__"]
 commit_message = "chore(release): {version} [skip ci]"
 
 [tool.semantic_release.branches.master]

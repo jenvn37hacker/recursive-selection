@@ -6,7 +6,7 @@ def _pyplot():
     try:
         import matplotlib.pyplot as plt
     except ImportError as exc:
-        raise ImportError('Install recursive-group-selection[plot] to draw charts.') from exc
+        raise ImportError('Install recursive-selection[plot] to draw charts.') from exc
     return plt
 
 

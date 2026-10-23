@@ -43,7 +43,7 @@ def repository(tmp_path, monkeypatch):
         checked_out_version = tomllib.loads(config)["project"]["version"]
         config = config.replace(f'version = "{checked_out_version}"', f'version = "{tagged}"', 1)
         (root / "pyproject.toml").write_text(config, encoding="utf-8")
-        package = root / "src/recursive_group_selection"
+        package = root / "src/recursive_selection"
         package.mkdir(parents=True)
         (package / "__init__.py").write_text(f'__version__ = "{tagged}"\n', encoding="utf-8")
         (package / "selector.py").write_text('"""Fixture implementation module."""\n', encoding="utf-8")
@@ -131,7 +131,7 @@ def test_superseded_push_does_not_release(repository):
 
 def test_mismatched_source_versions_fail(repository):
     root = repository()
-    (root / "src/recursive_group_selection/__init__.py").write_text('__version__ = "0.5.9"\n')
+    (root / "src/recursive_selection/__init__.py").write_text('__version__ = "0.5.9"\n')
     with pytest.raises(ValueError, match="must agree"):
         release.plan_release(root)
 
@@ -140,15 +140,15 @@ def wheel_matrix(root, directory, *, leak_source=False):
     directory.mkdir()
     for py in ["cp311", "cp312", "cp313"]:
         for platform in ["win_amd64", "manylinux_2_28_x86_64", "macosx_13_0_x86_64", "macosx_11_0_arm64"]:
-            path = directory / f"recursive_group_selection-0.5.0-{py}-{py}-{platform}.whl"
+            path = directory / f"recursive_selection-0.5.0-{py}-{py}-{platform}.whl"
             suffix = ".pyd" if platform == "win_amd64" else ".so"
             with ZipFile(path, "w") as archive:
-                archive.writestr("recursive_group_selection-0.5.0.dist-info/METADATA",
-                    "Name: recursive-group-selection\nVersion: 0.5.0\n")
-                archive.writestr("recursive_group_selection/__init__.py", '__version__ = "0.5.0"')
-                archive.writestr("recursive_group_selection/selector." + py + suffix, b"native fixture")
+                archive.writestr("recursive_selection-0.5.0.dist-info/METADATA",
+                    "Name: recursive-selection\nVersion: 0.5.0\n")
+                archive.writestr("recursive_selection/__init__.py", '__version__ = "0.5.0"')
+                archive.writestr("recursive_selection/selector." + py + suffix, b"native fixture")
                 if leak_source:
-                    archive.writestr("recursive_group_selection/selector.py", b"unexpected source")
+                    archive.writestr("recursive_selection/selector.py", b"unexpected source")
     return directory
 
 
@@ -181,7 +181,7 @@ def test_bad_or_incomplete_artifacts_never_pass(repository, tmp_path, problem):
     elif problem == "abi":
         first.rename(first.with_name(first.name.replace("-cp311-cp311-", "-cp311-abi3-")))
     elif problem == "module":
-        (root / "src/recursive_group_selection/extra.py").write_text("# additional implementation\n")
+        (root / "src/recursive_selection/extra.py").write_text("# additional implementation\n")
     with pytest.raises(ValueError):
         release.verify_wheels(root, directory, "0.5.0")
     assert not (directory / "SHA256SUMS").exists()

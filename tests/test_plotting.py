@@ -6,7 +6,7 @@ import sys
 import numpy as np
 import pytest
 
-from recursive_group_selection.plotting import (
+from recursive_selection.plotting import (
     importance_evolution_data, plot_importance_evolution, retry_history_data, plot_retry_history,
     plot_group_importance, plot_accepted_scores, plot_confusion_matrix,
     plot_processing_times, plot_metric_comparison, plot_selection_mask, plot_bootstrap_distribution,
@@ -23,7 +23,7 @@ def selection_result():
 
 def test_plotting_import_does_not_load_matplotlib():
     subprocess.run([sys.executable, "-c",
-        "import sys; import recursive_group_selection.plotting; assert 'matplotlib' not in sys.modules"],
+        "import sys; import recursive_selection.plotting; assert 'matplotlib' not in sys.modules"],
         check=True, env=os.environ.copy(), capture_output=True)
 
 
@@ -147,7 +147,7 @@ def test_bootstrap_histogram_handles_degenerate_distribution_and_confidence():
     mpl = pytest.importorskip("matplotlib")
     mpl.use("Agg")
     import matplotlib.pyplot as plt
-    from recursive_group_selection.evaluation import PairedClusterBootstrap
+    from recursive_selection.evaluation import PairedClusterBootstrap
     y = np.array([0, 0, 0, 0, 1, 1, 1, 1])
     result = PairedClusterBootstrap(n_resamples=30, confidence_level=0.95).compare(
         y, y, y, np.arange(len(y)), strata=y,

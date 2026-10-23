@@ -14,23 +14,25 @@ custom model adapter.
 
 The GitHub repository is
 [`recursive-selection`](https://github.com/tranvanphuongdevdream-web/recursive-selection).
-The installable distribution remains `recursive-group-selection` and the Python
-import remains `recursive_group_selection`; the repository rename does not require
-changes to existing notebook imports. The library is independent of the Z24 and
-QUGS research notebooks and is not published on PyPI.
+The installable distribution is `recursive-selection` and the Python import is
+`recursive_selection`. Version 1.0.0 introduces these names; applications using
+0.4.x or 0.5.x must install the new distribution and update their imports.
+The library is independent of the Z24 and QUGS research notebooks and is not
+published on PyPI.
 
 ## Install from GitHub Releases
 
-The [v0.5.0 release](https://github.com/tranvanphuongdevdream-web/recursive-selection/releases/tag/v0.5.0)
-provides both selection modes and **12 compiled wheels** for CPython 3.11, 3.12,
-and 3.13 on Windows x64, Linux x86_64, macOS Intel, and macOS Apple Silicon.
-For newer versions, see [GitHub Releases](https://github.com/tranvanphuongdevdream-web/recursive-selection/releases).
+CI builds **12 compiled wheels** for CPython 3.11, 3.12, and 3.13 on Windows x64,
+Linux x86_64, macOS Intel, and macOS Apple Silicon. Install the renamed package
+from **v1.0.0 or later** on [GitHub Releases](https://github.com/tranvanphuongdevdream-web/recursive-selection/releases).
+A version is downloadable after all build and test jobs finish and CI publishes
+its Release.
 
 For **Windows x64 and CPython 3.13**, install the following into the Python
 environment used by your application or notebook:
 
 ```powershell
-python -m pip install "recursive-group-selection[catboost,plot,report] @ https://github.com/tranvanphuongdevdream-web/recursive-selection/releases/download/v0.5.0/recursive_group_selection-0.5.0-cp313-cp313-win_amd64.whl"
+python -m pip install "recursive-selection[catboost,plot,report] @ https://github.com/tranvanphuongdevdream-web/recursive-selection/releases/download/v1.0.0/recursive_selection-1.0.0-cp313-cp313-win_amd64.whl"
 ```
 
 This installs the compiled library, its core dependencies, and the optional
@@ -47,19 +49,22 @@ the command. Select the wheel by all three properties:
 | macOS Intel | `macosx...x86_64` |
 | macOS Apple Silicon | `macosx...arm64` |
 
-The Release also includes `SHA256SUMS`. The historical
-[v0.4.0 release](https://github.com/tranvanphuongdevdream-web/recursive-selection/releases/tag/v0.4.0)
-remains available for applications pinned to the group-only API.
+The Release also includes `SHA256SUMS`. Historical releases
+[v0.4.0](https://github.com/tranvanphuongdevdream-web/recursive-selection/releases/tag/v0.4.0)
+and [v0.5.0](https://github.com/tranvanphuongdevdream-web/recursive-selection/releases/tag/v0.5.0)
+remain available under the former distribution `recursive-group-selection` and
+import namespace `recursive_group_selection`. Those wheels do not provide
+`recursive_selection`.
 
 ```python
-from recursive_group_selection import (
+from recursive_selection import (
     RecursiveGroupSelector, RecursiveFeatureSelector, CatBoostAdapter,
 )
 ```
 
 Repository names, distribution names, and import names are separate: clone
-`recursive-selection`, install `recursive-group-selection`, and import
-`recursive_group_selection`.
+`recursive-selection`, install `recursive-selection`, and import
+`recursive_selection`.
 
 ## Design
 
@@ -100,7 +105,7 @@ adapter `params` and training through `fit_params`; there is no estimator input,
 automatic backend detection, or backend registration API.
 
 ```python
-from recursive_group_selection import CatBoostAdapter, MacroQualityPolicy, RecursiveGroupSelector
+from recursive_selection import CatBoostAdapter, MacroQualityPolicy, RecursiveGroupSelector
 
 selector = RecursiveGroupSelector(
     model_adapter=CatBoostAdapter(
@@ -132,7 +137,7 @@ For individual-column selection, use the same adapter and policy settings with
 `RecursiveFeatureSelector`. Do not supply `feature_groups`:
 
 ```python
-from recursive_group_selection import RecursiveFeatureSelector
+from recursive_selection import RecursiveFeatureSelector
 
 feature_selector = RecursiveFeatureSelector(
     model_adapter=selector.model_adapter,
@@ -167,8 +172,8 @@ CatBoost, XGBoost, LightGBM or a custom model adapter.
 Reports, charts and audits consume the same result schema in either mode:
 
 ```python
-from recursive_group_selection.reporting import SelectionReport
-from recursive_group_selection.plotting import plot_importance_evolution
+from recursive_selection.reporting import SelectionReport
+from recursive_selection.plotting import plot_importance_evolution
 
 report = SelectionReport(
     feature_selector.result_,
@@ -318,7 +323,7 @@ Do not use `python setup.py install`.
 After building, replace the wheel filename below with the actual output filename:
 
 ```powershell
-& $libraryPython -m pip install ".\dist\recursive_group_selection-0.5.0-cp313-cp313-win_amd64.whl[catboost,plot,report]"
+& $libraryPython -m pip install ".\dist\recursive_selection-1.0.0-cp313-cp313-win_amd64.whl[catboost,plot,report]"
 ```
 
 Available extras are `catboost`, `xgboost`, `lightgbm`, `all`, `plot`, `report`,
@@ -362,12 +367,12 @@ publish to PyPI.
 
 Use Conventional Commit messages to describe the impact of changes:
 
-| Commit | Next version from 0.5.0 |
+| Commit | Next version from 1.0.0 |
 | --- | --- |
-| `fix: correct a calculation` | 0.5.1 |
-| `perf: reduce prediction overhead` | 0.5.1 |
-| `feat: add a ranking method` | 0.6.0 |
-| `feat!: change the selector API` or a `BREAKING CHANGE:` footer | 1.0.0 |
+| `fix: correct a calculation` | 1.0.1 |
+| `perf: reduce prediction overhead` | 1.0.1 |
+| `feat: add a ranking method` | 1.1.0 |
+| `feat!: change the selector API` or a `BREAKING CHANGE:` footer | 2.0.0 |
 | `docs: update examples`, `chore: ...`, `ci: ...` | No new release |
 
 The highest-impact change since the last version tag determines the bump. A
@@ -375,9 +380,9 @@ commit such as `update code` cannot communicate that impact and does not trigger
 a release. Non-release changes still build and test wheels. You do not manually
 edit version numbers or create tags for normal releases.
 
-The one-time bootstrap publishes source version **0.5.0** after the existing
-`v0.4.0` tag, including the previously untagged feature-selection API. From then
-on, CI updates `project.version` in `pyproject.toml` and `__version__` in the
+The one-time bootstrap published source version **0.5.0** after the existing
+`v0.4.0` tag, including the previously untagged feature-selection API. CI updates
+`project.version` in `pyproject.toml` and `__version__` in the
 public package together, generates `CHANGELOG.md`, and pushes a release commit
 and tag. Release commits contain `[skip ci]` to prevent duplicate builds. Both
 version preparation and wheel publication happen in the same workflow: a tag
@@ -450,7 +455,7 @@ and the Windows local build commands above remain available independently of CI.
 ## Paired cluster bootstrap of fixed-model predictions
 
 ```python
-from recursive_group_selection.evaluation import PairedClusterBootstrap
+from recursive_selection.evaluation import PairedClusterBootstrap
 
 bootstrap = PairedClusterBootstrap(
     n_resamples=50_000, confidence_level=0.90, random_state=42, batch_size=1_000,
@@ -502,7 +507,7 @@ Install the `[plot]` extra for Matplotlib. Importing the selector or the plottin
 namespace does not load Matplotlib; drawing a chart does.
 
 ```python
-from recursive_group_selection.plotting import (
+from recursive_selection.plotting import (
     plot_importance_evolution, plot_retry_history,
 )
 
@@ -547,7 +552,7 @@ The bootstrap histogram handles constant replicate values and labels tied values
 as at/below the bound rather than claiming that exactly ten percent lie below it.
 
 ```python
-from recursive_group_selection.plotting import plot_bootstrap_distribution
+from recursive_selection.plotting import plot_bootstrap_distribution
 
 fig, ax = plot_bootstrap_distribution(
     comparison,
@@ -557,10 +562,34 @@ fig, ax = plot_bootstrap_distribution(
 fig.savefig("bootstrap.png", dpi=300, bbox_inches="tight")
 ```
 
+## Migration from 0.4.x / 0.5.x
+
+Starting with 1.0.0, the distribution name is `recursive-selection` and the
+import namespace is `recursive_selection`. Install the new wheel and replace
+`recursive_group_selection` with `recursive_selection` in application imports:
+
+```python
+from recursive_selection import (
+    RecursiveGroupSelector, RecursiveFeatureSelector,
+    CatBoostAdapter, MeanAbsoluteShapRanker, MacroQualityPolicy,
+)
+from recursive_selection.evaluation import PairedClusterBootstrap
+from recursive_selection.reporting import SelectionReport
+```
+
+The selector class names and arguments are unchanged. Existing 0.4.x / 0.5.x
+installations continue to expose only their original namespace; installing the
+new distribution does not rewrite notebooks or replace the old distribution.
+This package does not provide an alias for the former namespace. Native
+model/JSON bundles keep the same format and can be loaded through the matching
+selector class in the new namespace. The historical wheels and Releases retain
+their original filenames.
+
 ## Migration from 0.1.0
 
-Version 0.4.0 uses the distribution `recursive-group-selection`, import namespace
-`recursive_group_selection`, and class `RecursiveGroupSelector`. The former
+Version 0.4.0 introduced the distribution `recursive-group-selection`, import
+namespace `recursive_group_selection`, and class `RecursiveGroupSelector`. These
+package names were subsequently replaced in 1.0.0 as described above. The former
 `shm-sensor-selection` distribution and `sensor_selection` import are not aliases
 of the new package. Existing installations can coexist because the namespaces differ.
 Use `feature_groups`, `min_groups`, and `selected_group_ids_` in new code.
@@ -591,11 +620,11 @@ may import pandas transitively when it is already installed; report construction
 is the only part of this library that directly requests pandas.
 
 ```python
-from recursive_group_selection.reporting import SelectionReport, style_metrics
-from recursive_group_selection.evaluation import (
+from recursive_selection.reporting import SelectionReport, style_metrics
+from recursive_selection.evaluation import (
     evaluate_classifier, compare_evaluations, audit_selection,
 )
-from recursive_group_selection.benchmarking import ProcessingBenchmark, collect_environment
+from recursive_selection.benchmarking import ProcessingBenchmark, collect_environment
 
 report = SelectionReport(selector.result_, feature_groups=feature_groups)
 display(report.style("trials"))
@@ -639,7 +668,7 @@ benchmark = ProcessingBenchmark.from_evaluations(
     candidate_feature_times={"Validation": selected_val_feature_seconds, "Test": selected_test_feature_seconds},
     reference_groups=len(feature_groups), candidate_groups=len(selector.selected_group_ids_),
 )
-environment = collect_environment(packages=("catboost", "numpy", "recursive-group-selection"),
+environment = collect_environment(packages=("catboost", "numpy", "recursive-selection"),
                                   inference_device="CPU", inference_threads="Model default")
 benchmark.save("reports/benchmark", prefix="example", environment=environment)
 ```

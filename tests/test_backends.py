@@ -8,13 +8,13 @@ import sys
 import numpy as np
 import pytest
 
-from recursive_group_selection import (CatBoostAdapter, LightGBMAdapter, MacroQualityPolicy,
+from recursive_selection import (CatBoostAdapter, LightGBMAdapter, MacroQualityPolicy,
                               RecursiveGroupSelector, XGBoostAdapter)
-from recursive_group_selection.backends._base import BaseModelAdapter, normalized_shap
+from recursive_selection.backends._base import BaseModelAdapter, normalized_shap
 
 
 def test_importing_core_does_not_import_optional_libraries():
-    command = [sys.executable, "-c", "import sys,recursive_group_selection; assert not {'catboost','xgboost','lightgbm','shap'}.intersection(sys.modules)"]
+    command = [sys.executable, "-c", "import sys,recursive_selection; assert not {'catboost','xgboost','lightgbm','shap'}.intersection(sys.modules)"]
     subprocess.run(command, check=True, env=os.environ.copy(), capture_output=True, text=True)
 
 
@@ -25,7 +25,7 @@ def test_selector_requires_an_explicit_adapter():
         RecursiveGroupSelector(model_adapter=None)
     with pytest.raises(TypeError, match="estimator"):
         RecursiveGroupSelector(estimator=object())
-    import recursive_group_selection as package
+    import recursive_selection as package
     assert not hasattr(package, 'register_backend')
 
 

@@ -15,7 +15,7 @@ class LightGBMAdapter(BaseModelAdapter):
         try:
             from lightgbm import LGBMClassifier
         except ImportError as exc:
-            raise ImportError('Install recursive-group-selection[lightgbm] to use this backend.') from exc
+            raise ImportError('Install recursive-selection[lightgbm] to use this backend.') from exc
         return LGBMClassifier
 
     def fit(self, model, X, y, eval_set):

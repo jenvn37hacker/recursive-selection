@@ -4,7 +4,7 @@ import json
 import numpy as np
 import pytest
 
-from recursive_group_selection import (
+from recursive_selection import (
     CatBoostAdapter, MacroQualityPolicy, RecursiveFeatureSelector, RecursiveGroupSelector,
 )
 from test_backends import sample_data
@@ -92,9 +92,9 @@ def test_feature_results_support_reports_charts_and_audit(tmp_path):
     mpl = pytest.importorskip("matplotlib")
     mpl.use("Agg")
     import matplotlib.pyplot as plt
-    from recursive_group_selection.evaluation import audit_selection
-    from recursive_group_selection.plotting import plot_importance_evolution, plot_retry_history
-    from recursive_group_selection.reporting import SelectionReport
+    from recursive_selection.evaluation import audit_selection
+    from recursive_selection.plotting import plot_importance_evolution, plot_retry_history
+    from recursive_selection.reporting import SelectionReport
     X, y = data()
     selector = feature_selector().fit(X, y, eval_set=(X, y))
     groups = selector.feature_groups_.as_dict()

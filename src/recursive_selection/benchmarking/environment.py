@@ -28,7 +28,7 @@ class EnvironmentReport:
                              if key == "Python" or key.startswith("Package: ")))
 
 
-def collect_environment(*, packages=("numpy", "scipy", "recursive-group-selection"),
+def collect_environment(*, packages=("numpy", "scipy", "recursive-selection"),
                         inference_device="Unspecified", inference_threads="Model default", extra=None):
     info = {"CPU": platform.processor() or "Unavailable", "Physical cores": "Unavailable",
             "Logical processors": os.cpu_count() or "Unavailable", "RAM (GB)": "Unavailable",

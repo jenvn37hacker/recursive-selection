@@ -5,10 +5,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from recursive_group_selection.benchmarking import ProcessingBenchmark, benchmark_prediction, collect_environment
-from recursive_group_selection.evaluation import audit_selection, compare_evaluations, evaluate_classifier
-from recursive_group_selection.reporting import BootstrapReport, SelectionReport, save_reports
-from recursive_group_selection.evaluation.results import BootstrapComparison
+from recursive_selection.benchmarking import ProcessingBenchmark, benchmark_prediction, collect_environment
+from recursive_selection.evaluation import audit_selection, compare_evaluations, evaluate_classifier
+from recursive_selection.reporting import BootstrapReport, SelectionReport, save_reports
+from recursive_selection.evaluation.results import BootstrapComparison
 from test_selection import make_selector
 
 
@@ -145,7 +145,7 @@ def test_comparison_rejects_different_ordered_labels():
 
 
 def test_prediction_timing_excludes_probabilities(monkeypatch):
-    import recursive_group_selection.evaluation.classification as module
+    import recursive_selection.evaluation.classification as module
     monkeypatch.setattr(module, 'perf_counter', iter([1., 1.25]).__next__)
     assert evaluated()['Test'].inference_seconds == .25
 
@@ -189,7 +189,7 @@ def test_export_collision_preflight_and_filename_validation(tmp_path):
 
 
 def test_environment_fallback_when_machine_query_fails(monkeypatch):
-    import recursive_group_selection.benchmarking.environment as module
+    import recursive_selection.benchmarking.environment as module
     monkeypatch.setattr(module.subprocess, 'run', lambda *a, **k: (_ for _ in ()).throw(OSError()))
     environment = collect_environment(packages=('a-nonexistent-package-name',))
     assert environment.information['Package: a-nonexistent-package-name'] == 'Not installed'

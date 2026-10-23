@@ -13,7 +13,7 @@ class CatBoostAdapter(BaseModelAdapter):
         try:
             from catboost import CatBoostClassifier
         except ImportError as exc:
-            raise ImportError('Install recursive-group-selection[catboost] to use this backend.') from exc
+            raise ImportError('Install recursive-selection[catboost] to use this backend.') from exc
         return CatBoostClassifier
 
     def fit(self, model, X, y, eval_set):

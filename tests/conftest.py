@@ -26,6 +26,6 @@ def pytest_sessionstart(session):
             "benchmarking.timing", "benchmarking.environment", "integrations.notebook",
         )
         for name in modules:
-            module = importlib.import_module("recursive_group_selection." + name)
+            module = importlib.import_module("recursive_selection." + name)
             if not any(str(module.__file__).endswith(suffix) for suffix in importlib.machinery.EXTENSION_SUFFIXES):
                 raise pytest.UsageError(f"Wheel test imported Python source instead of extension: {module.__file__}")

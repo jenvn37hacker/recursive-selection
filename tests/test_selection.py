@@ -3,10 +3,10 @@ import copy
 import numpy as np
 import pytest
 
-from recursive_group_selection import MacroQualityPolicy, RecursiveGroupSelector
-from recursive_group_selection.groups import FeatureGroups
-from recursive_group_selection.importance import MeanAbsoluteShapRanker
-from recursive_group_selection.results import MacroScores
+from recursive_selection import MacroQualityPolicy, RecursiveGroupSelector
+from recursive_selection.groups import FeatureGroups
+from recursive_selection.importance import MeanAbsoluteShapRanker
+from recursive_selection.results import MacroScores
 
 
 class FakeModel:

@@ -19,7 +19,7 @@ from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import Version
 
 VERSION = re.compile(r"\d+\.\d+\.\d+\Z")
-PROJECT = "recursive-group-selection"
+PROJECT = "recursive-selection"
 
 
 def run(root, *args):
@@ -42,7 +42,7 @@ def project_version(root):
     version = config["project"]["version"]
     if not VERSION.fullmatch(version):
         raise ValueError("Only stable major.minor.patch versions are released.")
-    tree = ast.parse((root / "src/recursive_group_selection/__init__.py").read_text(encoding="utf-8"))
+    tree = ast.parse((root / "src/recursive_selection/__init__.py").read_text(encoding="utf-8"))
     declared = [ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
                 and any(isinstance(t, ast.Name) and t.id == "__version__" for t in node.targets)]
     if declared != [version]:
@@ -155,7 +155,7 @@ def verify_wheels(root, directory, version):
                 for platform in ("windows", "linux", "macos-intel", "macos-arm64")}
     slots = set()
     modules = {p.relative_to(root / "src").with_suffix("").as_posix()
-               for p in (root / "src/recursive_group_selection").rglob("*.py") if p.name != "__init__.py"}
+               for p in (root / "src/recursive_selection").rglob("*.py") if p.name != "__init__.py"}
     for wheel in wheels:
         name, actual_version, build, tags = parse_wheel_filename(wheel.name)
         if canonicalize_name(name) != PROJECT or str(actual_version) != version or build:
@@ -200,7 +200,7 @@ class GitHub:
             raise ValueError("Unexpected GitHub API host.")
         body = data if binary else json.dumps(data).encode() if data is not None else None
         headers = {"Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github+json",
-                   "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "recursive-group-selection-release"}
+                   "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "recursive-selection-release"}
         if body is not None:
             headers["Content-Type"] = "application/octet-stream" if binary else "application/json"
         try:

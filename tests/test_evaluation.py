@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 from sklearn.metrics import f1_score
 
-from recursive_group_selection.evaluation import PairedClusterBootstrap
+from recursive_selection.evaluation import PairedClusterBootstrap
 
 
 @pytest.fixture
