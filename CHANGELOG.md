@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.3.0 (2026-10-26)
+
+### Features
+
+- Add fixed validation F1 gate with batch removal
+  ([`8e69edd`](https://github.com/jenvn37hacker/recursive-selection/commit/8e69edd154766500ce425f1d75d23030989e7e07))
+
+
 ## v1.2.0 (2026-10-26)
 
 ### Features
