@@ -80,14 +80,18 @@ class NotebookSelectionRecorder:
             )
             print(
                 f"Try removing {self.unit_name}:",
-                (self.group_labels or {}).get(event["group_id"], event["group_id"]),
+                [
+                    (self.group_labels or {}).get(group, group)
+                    for group in event.get("removed_group_ids", (event["group_id"],))
+                ],
             )
             print(f"{self.unit_name.title()}s before:", len(event["groups_before"]))
             print(f"{self.unit_name.title()}s tried:", len(event["proposed_groups"]))
         elif self.verbose and event["event"] == "trial_completed":
             for key, label in METRIC_NAMES.items():
                 print(
-                    f"{getattr(self, '_score_label', 'Validation')} {label}: {event['metrics'][key]:.2%}"
+                    f"{getattr(self, '_score_label', 'Validation')} {label}"
+                    f"{' upper bound' if event.get('metric_kind') == 'cv_upper_bound' else ''}: {event['metrics'][key]:.2%}"
                 )
             print(f"Worst gate margin (pp): {100 * event['worst_margin']:+.4f}")
             print(

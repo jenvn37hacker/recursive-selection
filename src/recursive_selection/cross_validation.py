@@ -1,6 +1,11 @@
 """Fixed Train-only CV membership and fresh-model scoring for automatic gates."""
 
 from time import perf_counter
+from copy import copy, deepcopy
+from concurrent.futures import ThreadPoolExecutor
+from math import fsum
+
+from threadpoolctl import threadpool_limits
 
 import numpy as np
 from sklearn.model_selection import (
@@ -9,7 +14,7 @@ from sklearn.model_selection import (
     train_test_split,
 )
 
-from .results import CVFold, CVScoreSummary, MacroScores
+from .results import CVFold, CVScoreSummary, CVPrunedEvaluation, MacroScores
 
 
 def summarize_scores(scores, *, training_seconds=0.0, prediction_seconds=0.0):
@@ -155,6 +160,33 @@ def make_folds(X, y, policy, groups=None):
     return folds, groups
 
 
+def cv_upper_bounds(scores, total_folds):
+    """Outward-rounded maximum possible all-fold mean for bounded [0, 1] scores."""
+    scores = tuple(scores)
+    if not 0 < len(scores) <= total_folds:
+        raise ValueError("Invalid observed/total fold counts.")
+    for score in scores:
+        if any(not np.isfinite(v) or not 0 <= v <= 1 for v in score.as_dict().values()):
+            raise ValueError("CV scores must be finite and in [0, 1].")
+    remaining = total_folds - len(scores)
+    return MacroScores(
+        *(
+            min(
+                1.0,
+                np.nextafter(
+                    np.nextafter(
+                        fsum([*(getattr(score, key) for score in scores), remaining])
+                        / total_folds,
+                        np.inf,
+                    ),
+                    np.inf,
+                ),
+            )
+            for key in scores[0].as_dict()
+        )
+    )
+
+
 def evaluate_folds(
     adapter,
     X,
@@ -166,45 +198,117 @@ def evaluate_folds(
     forbidden_models=(),
     emit=None,
     trial_id=0,
+    speed_options=None,
+    floors=None,
+    tolerance=1e-12,
 ):
     scores, models = [], []
     train_seconds = prediction_seconds = 0.0
-    for number, fold in enumerate(folds, 1):
+    jobs, threads = (
+        speed_options.resources(len(folds), adapter) if speed_options else (1, None)
+    )
+    if speed_options is not None and getattr(adapter, "backend_name", "") == "catboost":
+        # Concurrent CatBoost fits must not redirect the notebook's global log
+        # streams. Keep the deployment adapter unchanged; worker fits are quiet.
+        worker_adapter = copy(adapter)
+        worker_adapter.params = deepcopy(adapter.params)
+        worker_adapter.fit_params = deepcopy(adapter.fit_params)
+        for options in (worker_adapter.params, worker_adapter.fit_params):
+            for key in ("verbose", "verbose_eval", "logging_level", "silent"):
+                options.pop(key, None)
+        worker_adapter.params["verbose"] = False
+        worker_adapter.fit_params["verbose"] = False
+        adapter = worker_adapter
+    can_prune = (
+        speed_options is not None and speed_options.early_reject and floors is not None
+    )
+
+    def run_fold(model, fold):
         train, stopping, heldout = (
             np.asarray(rows, dtype=int)
             for rows in (fold.train_rows, fold.stopping_rows, fold.heldout_rows)
         )
-        model = adapter.new_model()
-        if any(model is previous for previous in (*models, *forbidden_models)):
-            raise ValueError("CV backend must return a fresh model for every fold.")
-        models.append(model)
-        if emit:
-            emit(
-                "cv_fold_started",
-                trial_id=trial_id,
-                fold=number,
-                folds=len(folds),
-                n_features=X.shape[1],
-            )
         tick = perf_counter()
         adapter.fit(model, X[train], y[train], (X[stopping], y[stopping]))
-        train_seconds += perf_counter() - tick
+        training = perf_counter() - tick
         check_model(adapter, model, X.shape[1], classes)
         tick = perf_counter()
         score = MacroScores.from_predictions(
             y[heldout], adapter.predict(model, X[heldout]), classes
         )
-        prediction_seconds += perf_counter() - tick
-        scores.append(score)
-        if emit:
-            emit(
-                "cv_fold_completed",
-                trial_id=trial_id,
-                fold=number,
-                folds=len(folds),
-                n_features=X.shape[1],
-                metrics=score.as_dict(),
-            )
+        return score, training, perf_counter() - tick
+
+    # Worker fits never invoke notebook/recorder APIs. Events are emitted on the
+    # caller thread, with deterministic fold order, after each bounded wave.
+    with (
+        threadpool_limits(limits=threads),
+        ThreadPoolExecutor(max_workers=jobs) as executor,
+    ):
+        position = 0
+        while position < len(folds):
+            size = 1 if can_prune and position == 0 else jobs
+            wave = []
+            for index in range(position, min(position + size, len(folds))):
+                model = adapter.new_model()
+                if any(model is previous for previous in (*models, *forbidden_models)):
+                    raise ValueError(
+                        "CV backend must return a fresh model for every fold."
+                    )
+                models.append(model)
+                if threads is not None and hasattr(model, "set_params"):
+                    backend = getattr(adapter, "backend_name", "")
+                    if backend in ("catboost", "xgboost", "lightgbm"):
+                        parameter_name = (
+                            "thread_count" if backend == "catboost" else "n_jobs"
+                        )
+                        thread_settings = {parameter_name: threads}
+                        model.set_params(**thread_settings)
+                if emit:
+                    emit(
+                        "cv_fold_started",
+                        trial_id=trial_id,
+                        fold=index + 1,
+                        folds=len(folds),
+                        n_features=X.shape[1],
+                    )
+                wave.append((index, executor.submit(run_fold, model, folds[index])))
+            for index, future in wave:
+                score, training, predicting = future.result()
+                train_seconds += training
+                prediction_seconds += predicting
+                scores.append(score)
+                if emit:
+                    emit(
+                        "cv_fold_completed",
+                        trial_id=trial_id,
+                        fold=index + 1,
+                        folds=len(folds),
+                        n_features=X.shape[1],
+                        metrics=score.as_dict(),
+                    )
+            position += len(wave)
+            if can_prune and position < len(folds):
+                bounds = cv_upper_bounds(scores, len(folds))
+                if any(
+                    getattr(bounds, key) < floor - tolerance
+                    for key, floor in floors.as_dict().items()
+                ):
+                    if emit:
+                        emit(
+                            "cv_pruned",
+                            trial_id=trial_id,
+                            completed_folds=position,
+                            folds=len(folds),
+                            upper_bounds=bounds.as_dict(),
+                            n_features=X.shape[1],
+                        )
+                    return CVPrunedEvaluation(
+                        tuple(scores),
+                        len(folds),
+                        bounds,
+                        train_seconds,
+                        prediction_seconds,
+                    )
     return summarize_scores(
         scores, training_seconds=train_seconds, prediction_seconds=prediction_seconds
     )
@@ -234,15 +338,35 @@ def validate_cv_trace(result, policy):
             list(a.as_dict().values()), list(b.as_dict().values()), atol=1e-12, rtol=0
         )
 
+    if not isinstance(trace.baseline, CVScoreSummary) or not isinstance(
+        trace.final, CVScoreSummary
+    ):
+        raise ValueError("Reference and accepted CV summaries must contain all folds.")
     for summary in (trace.baseline, *trace.trials, trace.final):
-        if len(summary.fold_scores) != policy.n_splits:
-            raise ValueError("CV summary fold count differs from membership.")
-        expected = summarize_scores(summary.fold_scores)
-        if any(
-            not same(getattr(summary, name), getattr(expected, name))
-            for name in ("mean", "standard_deviation", "standard_error")
-        ):
-            raise ValueError("CV mean/SD/SE differs from recorded fold scores.")
+        if isinstance(summary, CVPrunedEvaluation):
+            if result.speed_options is None or not result.speed_options.early_reject:
+                raise ValueError("Pruned CV requires enabled early rejection.")
+            if (
+                summary.total_folds != policy.n_splits
+                or not 0 < len(summary.fold_scores) < policy.n_splits
+            ):
+                raise ValueError("Invalid pruned CV fold counts.")
+            if not same(
+                summary.upper_bounds,
+                cv_upper_bounds(summary.fold_scores, policy.n_splits),
+            ):
+                raise ValueError("CV upper bounds differ from observed fold scores.")
+            if policy.evaluate(summary.upper_bounds, result.effective_floors).passed:
+                raise ValueError("Pruned CV cannot certify rejection.")
+        else:
+            if len(summary.fold_scores) != policy.n_splits:
+                raise ValueError("CV summary fold count differs from membership.")
+            expected = summarize_scores(summary.fold_scores)
+            if any(
+                not same(getattr(summary, name), getattr(expected, name))
+                for name in ("mean", "standard_deviation", "standard_error")
+            ):
+                raise ValueError("CV mean/SD/SE differs from recorded fold scores.")
         if any(
             not np.isfinite(value) or value < 0
             for value in (summary.training_seconds, summary.prediction_seconds)
@@ -263,8 +387,27 @@ def validate_cv_trace(result, policy):
     for trial, summary, validation in zip(
         result.history, trace.trials, trace.validation_trials
     ):
-        if not same(trial.metrics, summary.mean):
-            raise ValueError("Trial gate metrics differ from its CV mean.")
+        pruned = isinstance(summary, CVPrunedEvaluation)
+        expected_scores = summary.upper_bounds if pruned else summary.mean
+        if not same(trial.metrics, expected_scores) or trial.metric_kind != (
+            "cv_upper_bound" if pruned else "mean"
+        ):
+            raise ValueError(
+                "Trial gate metrics differ from its CV mean or upper bound."
+            )
+        if pruned and trial.accepted:
+            raise ValueError("A pruned candidate cannot be accepted.")
+        if result.speed_options is not None:
+            if trial.accepted != (validation is not None):
+                raise ValueError(
+                    "CV-first fits/Validation diagnostics must exist only for accepted trials."
+                )
+            if not trial.accepted and (
+                trial.train_seconds != 0 or trial.validation_predict_seconds != 0
+            ):
+                raise ValueError(
+                    "A rejected CV-first candidate must not have a deployment fit."
+                )
         if trial.accepted:
             selected, validation_selected = summary, validation
     if selected != trace.final or not same(result.final_metrics, trace.final.mean):
@@ -275,8 +418,19 @@ def validate_cv_trace(result, policy):
         raise ValueError(
             "Final Validation diagnostics differ from the last accepted configuration."
         )
-    if (
-        int(result.timings.get("cv_fit_count", -1))
-        != (1 + len(result.history)) * policy.n_splits
-    ):
+    if int(result.timings.get("cv_fit_count", -1)) != len(
+        trace.baseline.fold_scores
+    ) + sum(len(item.fold_scores) for item in trace.trials):
         raise ValueError("Recorded CV fit count differs from history.")
+
+    if result.speed_options is not None:
+        accepted_count = sum(trial.accepted for trial in result.history)
+        if result.timings.get("trial_model_fit_count") != accepted_count:
+            raise ValueError(
+                "CV-first deployment fit count differs from accepted history."
+            )
+        expected_pruned = sum(
+            isinstance(item, CVPrunedEvaluation) for item in trace.trials
+        )
+        if result.timings.get("cv_pruned_trials") != expected_pruned:
+            raise ValueError("Pruned trial count differs from CV evidence.")

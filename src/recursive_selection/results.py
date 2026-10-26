@@ -55,6 +55,8 @@ class TrialRecord:
     failed_metrics: tuple[str, ...]
     train_seconds: float
     validation_predict_seconds: float
+    removed_group_ids: tuple[int, ...] = ()
+    metric_kind: str = "mean"
 
     def as_dict(self):
         return asdict(self)
@@ -92,6 +94,7 @@ class SelectionResult:
     timings: dict[str, float]
     stop_reason: str
     cv_evaluation: "CVEvaluationTrace | None" = None
+    speed_options: Any = None
 
 
 @dataclass(frozen=True)
@@ -114,14 +117,25 @@ class CVScoreSummary:
 
 
 @dataclass(frozen=True)
+class CVPrunedEvaluation:
+    """Observed folds and rigorous all-fold upper bounds; no full CV mean."""
+
+    fold_scores: tuple[MacroScores, ...]
+    total_folds: int
+    upper_bounds: MacroScores
+    training_seconds: float = 0.0
+    prediction_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
 class CVEvaluationTrace:
     folds: tuple[CVFold, ...]
     grouped: bool
     baseline: CVScoreSummary
-    trials: tuple[CVScoreSummary, ...]
+    trials: tuple[CVScoreSummary | CVPrunedEvaluation, ...]
     final: CVScoreSummary
     validation_baseline: MacroScores
-    validation_trials: tuple[MacroScores, ...]
+    validation_trials: tuple[MacroScores | None, ...]
     validation_final: MacroScores
     labels: tuple = ()
     group_ids: tuple | None = None

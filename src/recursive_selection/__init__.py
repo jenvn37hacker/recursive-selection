@@ -1,5 +1,6 @@
 """Public API; optional model libraries are imported only when used."""
 
+from .acceleration import SelectionSpeedOptions
 from .backends import CatBoostAdapter, LightGBMAdapter, XGBoostAdapter
 from .importance import MeanAbsoluteShapRanker
 from .policies import MacroQualityPolicy, CVReferenceQualityPolicy
@@ -11,6 +12,7 @@ __all__ = [
     "RecursiveFeatureSelector",
     "MacroQualityPolicy",
     "CVReferenceQualityPolicy",
+    "SelectionSpeedOptions",
     "MeanAbsoluteShapRanker",
     "CatBoostAdapter",
     "XGBoostAdapter",

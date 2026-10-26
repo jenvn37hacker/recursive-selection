@@ -7,6 +7,7 @@ from time import perf_counter
 import numpy as np
 
 from .groups import FeatureGroups, labels, numeric_matrix
+from .acceleration import SelectionSpeedOptions, RemovalPlanner
 from .importance import MeanAbsoluteShapRanker
 from .policies import MacroQualityPolicy, CVReferenceQualityPolicy
 from .cross_validation import make_folds, evaluate_folds
@@ -17,6 +18,7 @@ from .results import (
     ShapSnapshot,
     TrialRecord,
     CVEvaluationTrace,
+    CVPrunedEvaluation,
 )
 
 
@@ -33,6 +35,7 @@ class _RecursiveSelectorBase:
         quality_policy=None,
         min_groups=1,
         recorder=None,
+        speed_options=None,
     ):
         if model_adapter is None:
             raise ValueError("model_adapter is required.")
@@ -48,6 +51,11 @@ class _RecursiveSelectorBase:
             quality_policy if quality_policy is not None else MacroQualityPolicy()
         )
         self.min_groups = int(min_groups)
+        if speed_options is not None and not isinstance(
+            speed_options, SelectionSpeedOptions
+        ):
+            raise TypeError("speed_options must be SelectionSpeedOptions or None.")
+        self.speed_options = speed_options
         self.recorder = recorder
         self._is_fitted = False
 
@@ -141,6 +149,9 @@ class _RecursiveSelectorBase:
             )
         adapter = self.model_adapter
         cv_mode = isinstance(self.quality_policy, CVReferenceQualityPolicy)
+        speed = self.speed_options
+        if speed is not None and not cv_mode:
+            raise ValueError("SelectionSpeedOptions requires CVReferenceQualityPolicy.")
         if cv_groups is not None and not cv_mode:
             raise ValueError("cv_groups requires CVReferenceQualityPolicy.")
         cv_folds, validated_cv_groups = (
@@ -154,6 +165,7 @@ class _RecursiveSelectorBase:
             "trial_training_seconds": 0.0,
             "validation_prediction_seconds": 0.0,
             "shap_update_seconds": 0.0,
+            "trial_model_fit_count": 0,
         }
         self._emit("run_started", group_ids=groups.group_ids)
         if full_model is None:
@@ -186,6 +198,7 @@ class _RecursiveSelectorBase:
                 check_model=self._check_model,
                 forbidden_models=(full_model,),
                 emit=self._emit,
+                speed_options=speed,
             )
             cv_current = cv_baseline
             baseline = cv_baseline.mean
@@ -204,7 +217,10 @@ class _RecursiveSelectorBase:
         current_model = full_model
         current_groups = groups.group_ids
         current_scores = baseline
-        failed = set()
+        planner = RemovalPlanner(
+            self.min_groups, speed.removal_fraction if speed else 0.0
+        )
+        failed = planner.failed
         attempted = set()
         tick = perf_counter()
         ranking = self._rank(adapter, current_model, X, y, groups, current_groups)
@@ -222,43 +238,64 @@ class _RecursiveSelectorBase:
         )
         loop_started = perf_counter()
         configuration_id = 0
+        if speed:
+            jobs, threads = speed.resources(len(cv_folds), adapter)
+            timings.update(
+                cv_workers=jobs, cv_threads_per_worker=threads, cv_pruned_trials=0
+            )
+
+        def fit_candidate(X_candidate, X_val_candidate):
+            model = adapter.new_model()
+            if model is current_model or model is full_model:
+                raise ValueError("Backend must return a fresh model for every trial.")
+            tick = perf_counter()
+            adapter.fit(model, X_candidate, y, (X_val_candidate, y_val))
+            training = perf_counter() - tick
+            timings["trial_training_seconds"] += training
+            timings["trial_model_fit_count"] += 1
+            self._check_model(adapter, model, X_candidate.shape[1], classes)
+            tick = perf_counter()
+            predictions = adapter.predict(model, X_val_candidate)
+            predicting = perf_counter() - tick
+            timings["validation_prediction_seconds"] += predicting
+            return (
+                model,
+                MacroScores.from_predictions(y_val, predictions, classes),
+                training,
+                predicting,
+            )
+
         while True:
             if len(current_groups) <= self.min_groups:
                 stop_reason = "min_groups_reached"
                 break
-            eligible = [group for group in current_groups if group not in failed]
-            if not eligible:
+            removed = planner.choose(current_groups, ranking)
+            if not removed:
                 stop_reason = "all_candidates_rejected"
                 break
-            group = min(eligible, key=lambda key: (ranking[key], -key))
-            proposed = tuple(s for s in current_groups if s != group)
+            group = removed[0]
+            proposed = tuple(s for s in current_groups if s not in removed)
             columns = groups.columns(proposed)
             X_candidate = X[:, columns]
             X_val_candidate = X_val[:, columns]
             trial_id = len(history) + 1
-            trial_model = adapter.new_model()
-            if trial_model is current_model or trial_model is full_model:
-                raise ValueError("Backend must return a fresh model for every trial.")
             self._emit(
                 "trial_started",
                 trial_id=trial_id,
                 configuration_id=configuration_id,
                 group_id=group,
+                removed_group_ids=removed,
                 groups_before=current_groups,
                 proposed_groups=proposed,
             )
-            tick = perf_counter()
-            # Training/prediction errors propagate; they are never metric rejections.
-            adapter.fit(trial_model, X_candidate, y, (X_val_candidate, y_val))
-            train_seconds = perf_counter() - tick
-            timings["trial_training_seconds"] += train_seconds
-            self._check_model(adapter, trial_model, len(columns), classes)
-            tick = perf_counter()
-            predictions = adapter.predict(trial_model, X_val_candidate)
-            predict_seconds = perf_counter() - tick
-            timings["validation_prediction_seconds"] += predict_seconds
-            scores = MacroScores.from_predictions(y_val, predictions, classes)
-            validation_scores = scores
+            trial_model, validation_scores = None, None
+            train_seconds = predict_seconds = 0.0
+            if speed is None:
+                trial_model, validation_scores, train_seconds, predict_seconds = (
+                    fit_candidate(X_candidate, X_val_candidate)
+                )
+            scores = validation_scores
+            metric_kind = "mean"
             if cv_mode:
                 cv_trial = evaluate_folds(
                     adapter,
@@ -270,14 +307,26 @@ class _RecursiveSelectorBase:
                     forbidden_models=(full_model, current_model, trial_model),
                     emit=self._emit,
                     trial_id=trial_id,
+                    speed_options=speed,
+                    floors=floors,
+                    tolerance=self.quality_policy.tolerance,
                 )
-                cv_trials.append(cv_trial)
-                validation_trials.append(validation_scores)
                 timings["cv_trial_training_seconds"] += cv_trial.training_seconds
                 timings["cv_trial_prediction_seconds"] += cv_trial.prediction_seconds
-                timings["cv_fit_count"] += len(cv_folds)
-                scores = cv_trial.mean
+                timings["cv_fit_count"] += len(cv_trial.fold_scores)
+                if isinstance(cv_trial, CVPrunedEvaluation):
+                    scores, metric_kind = cv_trial.upper_bounds, "cv_upper_bound"
+                    timings["cv_pruned_trials"] += 1
+                else:
+                    scores = cv_trial.mean
+                cv_trials.append(cv_trial)
             decision = self.quality_policy.evaluate(scores, floors)
+            if speed is not None and decision.passed:
+                trial_model, validation_scores, train_seconds, predict_seconds = (
+                    fit_candidate(X_candidate, X_val_candidate)
+                )
+            if cv_mode:
+                validation_trials.append(validation_scores)
             changes = MacroScores(
                 *(
                     scores.as_dict()[name] - baseline.as_dict()[name]
@@ -290,7 +339,7 @@ class _RecursiveSelectorBase:
                 group,
                 current_groups,
                 proposed,
-                ranking[group],
+                float(np.mean([ranking[item] for item in removed])),
                 scores,
                 changes,
                 decision.passed,
@@ -298,12 +347,14 @@ class _RecursiveSelectorBase:
                 decision.failed_metrics,
                 train_seconds,
                 predict_seconds,
+                removed if speed else (),
+                metric_kind,
             )
             history.append(trial)
-            attempted.add(group)
+            attempted.update(removed)
             self._emit("trial_completed", **trial.as_dict())
+            planner.observe(removed, decision.passed)
             if not decision.passed:
-                failed.add(group)
                 continue
             current_groups = proposed
             current_model = trial_model
@@ -371,6 +422,7 @@ class _RecursiveSelectorBase:
             dict(timings),
             stop_reason,
             cv_trace,
+            speed,
         )
         self._emit(
             "run_finished",
@@ -521,6 +573,7 @@ class RecursiveFeatureSelector(_RecursiveSelectorBase):
         quality_policy=None,
         min_features=1,
         recorder=None,
+        speed_options=None,
     ):
         if (
             isinstance(min_features, bool)
@@ -534,6 +587,7 @@ class RecursiveFeatureSelector(_RecursiveSelectorBase):
             quality_policy=quality_policy,
             min_groups=min_features,
             recorder=recorder,
+            speed_options=speed_options,
         )
 
     @property

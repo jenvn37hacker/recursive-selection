@@ -38,6 +38,7 @@ def pytest_sessionstart(session):
             "results",
             "persistence",
             "cross_validation",
+            "acceleration",
             "backends._base",
             "backends.restoration",
             "backends.catboost",

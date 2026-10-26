@@ -8,7 +8,7 @@ version = "1.1.0"
 description = "Validation-constrained recursive feature and feature-group selection with paired bootstrap evaluation"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
-dependencies = ["numpy>=1.26,<3", "scikit-learn>=1.4,<2"]
+dependencies = ["numpy>=1.26,<3", "scikit-learn>=1.4,<2", "joblib>=1.2,<2"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",

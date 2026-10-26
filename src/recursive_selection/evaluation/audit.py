@@ -4,6 +4,7 @@ from numbers import Integral
 
 import numpy as np
 
+from ..acceleration import RemovalPlanner, removed_ids
 from ..groups import FeatureGroups
 from ..reporting.export import save_reports
 from ..reporting.selection import METRIC_NAMES, SelectionReport
@@ -88,7 +89,12 @@ def audit_selection(
         "accepted states and SHAP snapshot counts differ",
     )
     current = groups.group_ids
-    failed, configuration, snapshot_index = set(), 0, 0
+    planner = RemovalPlanner(
+        min_groups,
+        result.speed_options.removal_fraction if result.speed_options else 0.0,
+    )
+    failed = planner.failed
+    configuration, snapshot_index = 0, 0
     current_metrics, current_trial = result.baseline_metrics, 0
     before, final_trial_ids = {}, []
 
@@ -129,17 +135,25 @@ def audit_selection(
             trial.trial_id == expected_id and trial.configuration_id == configuration,
             "trial sequence/configuration is inconsistent",
         )
-        eligible = [g for g in current if g not in failed]
-        require(bool(eligible), "trial continued after all candidates failed")
-        chosen = min(eligible, key=lambda key: (ranking[key], -key))
-        require(trial.group_id == chosen, "importance order or tie rule differs")
-        proposed = tuple(g for g in current if g != chosen)
+        removed = planner.choose(current, ranking)
+        require(bool(removed), "trial continued after all candidates failed")
+        chosen = removed[0]
+        require(
+            trial.group_id == chosen and removed_ids(trial) == removed,
+            "importance order, batch backoff or tie rule differs",
+        )
+        proposed = tuple(g for g in current if g not in removed)
         require(
             trial.groups_before == current and trial.proposed_groups == proposed,
             "trial group schema/order differs",
         )
         require(
-            np.isclose(trial.importance, ranking[chosen], atol=1e-12, rtol=0),
+            np.isclose(
+                trial.importance,
+                np.mean([ranking[g] for g in removed]),
+                atol=1e-12,
+                rtol=0,
+            ),
             "trial importance differs",
         )
         for key, score in trial.metrics.as_dict().items():
@@ -171,7 +185,9 @@ def audit_selection(
             "invalid recorded time",
         )
         before[trial.trial_id] = current
-        final_trial_ids.append(trial.trial_id)
+        if len(removed) == 1:
+            final_trial_ids.append(trial.trial_id)
+        planner.observe(removed, trial.accepted)
         if trial.accepted:
             current, current_metrics, current_trial = (
                 proposed,
@@ -186,8 +202,6 @@ def audit_selection(
                 snapshot_index < len(result.shap_history), "missing accepted snapshot"
             )
             ranking = check_snapshot()
-        else:
-            failed.add(chosen)
     require(snapshot_index + 1 == len(result.shap_history), "extra accepted snapshots")
     require(
         current == result.selected_group_ids
@@ -209,9 +223,18 @@ def audit_selection(
         len(groups.group_ids) * (len(groups.group_ids) + 1)
         - min_groups * (min_groups + 1)
     ) // 2
+    if result.speed_options is not None:
+        # Each accepted configuration can try a shrinking batch chain, followed
+        # by at most k distinct failed singleton removals before acceptance/stop.
+        from math import ceil
+
+        trial_bound = sum(
+            k + max(1, ceil(k * result.speed_options.removal_fraction)).bit_length()
+            for k in range(min_groups + 1, len(groups.group_ids) + 1)
+        )
     require(len(result.history) <= trial_bound, "finite trial bound exceeded")
     require(
-        len(result.shap_history) == 1 + len(groups.group_ids) - len(current),
+        len(result.shap_history) == 1 + sum(trial.accepted for trial in result.history),
         "SHAP call count differs",
     )
     report = SelectionReport(
@@ -235,7 +258,11 @@ def audit_selection(
     final = final.assign(**final_columns)
     retry_rows = []
     for group in report.retry_group_ids:
-        attempts = [t for t in result.history if t.group_id == group]
+        attempts = [
+            t
+            for t in result.history
+            if len(removed_ids(t)) == 1 and t.group_id == group
+        ]
         accepted = next(t for t in attempts if t.accepted)
         rejected = next(
             t for t in attempts if not t.accepted and t.trial_id < accepted.trial_id
@@ -291,7 +318,11 @@ def audit_selection(
             "Verified",
         ),
         ("Finite trial bound", f"{len(result.history)} <= {trial_bound}", "Verified"),
-        ("SHAP calls = 1 + removed groups", str(len(result.shap_history)), "Verified"),
+        (
+            "SHAP calls = 1 + accepted removals",
+            str(len(result.shap_history)),
+            "Verified",
+        ),
         (
             "Final single-deletion condition",
             (
@@ -323,7 +354,7 @@ def audit_selection(
                 ),
                 (
                     "CV calibration and trial summaries",
-                    "Means, sample SD and SE replayed from all fold scores",
+                    "Full-fold means/SD/SE and early-rejection bounds replayed from observed folds",
                     "Verified",
                 ),
             ]

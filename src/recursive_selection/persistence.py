@@ -10,6 +10,7 @@ import platform
 import numpy as np
 
 from .backends import adapter_from_specification
+from .acceleration import SelectionSpeedOptions
 from .importance import MeanAbsoluteShapRanker
 from .policies import MacroQualityPolicy, CVReferenceQualityPolicy
 from .results import (
@@ -21,6 +22,7 @@ from .results import (
     CVFold,
     CVScoreSummary,
     CVEvaluationTrace,
+    CVPrunedEvaluation,
 )
 
 
@@ -88,12 +90,19 @@ def save_selector(selector, directory):
             "Choose an empty/new directory; saved selections are not overwritten."
         )
     metadata = {
-        "format_version": 4 if selector.cv_evaluation_ is not None else 3,
+        "format_version": (
+            5
+            if selector.speed_options
+            else (4 if selector.cv_evaluation_ is not None else 3)
+        ),
         "package_version": __version__,
         "python_version": platform.python_version(),
         "selection_mode": selector._selection_mode,
         "backend": specification,
         "policy": selector.quality_policy.to_config(),
+        "speed_options": (
+            selector.speed_options.to_config() if selector.speed_options else None
+        ),
         "min_groups": selector.min_groups,
         "classes": selector.classes_.tolist(),
         "n_features_in": selector.n_features_in_,
@@ -142,7 +151,7 @@ def load_selector(directory):
         json.loads((directory / "selection.json").read_text(encoding="utf-8"))
     )
     data = _migrate_metadata(data)
-    if data["format_version"] not in (2, 3, 4):
+    if data["format_version"] not in (2, 3, 4, 5):
         raise ValueError("Unsupported selection metadata version.")
     mode = (
         data.get("selection_mode", "group")
@@ -184,6 +193,8 @@ def load_selector(directory):
         item = dict(item)
         for name in ("groups_before", "proposed_groups", "failed_metrics"):
             item[name] = tuple(item[name])
+        if "removed_group_ids" in item:
+            item["removed_group_ids"] = tuple(item["removed_group_ids"])
         item["metrics"] = MacroScores(**item["metrics"])
         item["change_from_full"] = MacroScores(**item["change_from_full"])
         history.append(TrialRecord(**item))
@@ -217,8 +228,8 @@ def load_selector(directory):
     ):
         raise ValueError("Saved feature names do not match the selected column schema.")
     policy_name = data.get("policy_type", "macro")
-    if data["format_version"] == 4 and policy_name != "cv_reference":
-        raise ValueError("Format 4 requires CV policy metadata.")
+    if data["format_version"] >= 4 and policy_name != "cv_reference":
+        raise ValueError("CV formats require CV policy metadata.")
     if policy_name not in {"macro", "cv_reference"}:
         raise ValueError("Unknown saved quality policy.")
     policy = (
@@ -231,6 +242,13 @@ def load_selector(directory):
         if policy_name == "cv_reference"
         else None
     )
+    speed = (
+        SelectionSpeedOptions(**data["speed_options"])
+        if data.get("speed_options") is not None
+        else None
+    )
+    if data["format_version"] == 5 and speed is None:
+        raise ValueError("Accelerated format requires speed options.")
     result = SelectionResult(
         model,
         group_ids,
@@ -245,6 +263,7 @@ def load_selector(directory):
         data["timings"],
         data["stop_reason"],
         cv_trace,
+        speed,
     )
     if cv_trace is not None:
         from .cross_validation import validate_cv_trace
@@ -256,7 +275,9 @@ def load_selector(directory):
     minimum = {
         "min_features" if mode == "feature" else "min_groups": data["min_groups"]
     }
-    selector = selector_class(model_adapter=adapter, quality_policy=policy, **minimum)
+    selector = selector_class(
+        model_adapter=adapter, quality_policy=policy, speed_options=speed, **minimum
+    )
     selector.adapter_ = adapter
     # Only the final model is persisted. The original full model is not restored.
     selector.full_model_ = None
@@ -304,6 +325,14 @@ def _migrate_metadata(data):
 
 def _restore_cv_trace(data):
     def summary(value):
+        if "upper_bounds" in value:
+            return CVPrunedEvaluation(
+                tuple(MacroScores(**score) for score in value["fold_scores"]),
+                value["total_folds"],
+                MacroScores(**value["upper_bounds"]),
+                value["training_seconds"],
+                value["prediction_seconds"],
+            )
         return CVScoreSummary(
             tuple(MacroScores(**score) for score in value["fold_scores"]),
             MacroScores(**value["mean"]),
@@ -327,7 +356,10 @@ def _restore_cv_trace(data):
         tuple(summary(item) for item in data["trials"]),
         summary(data["final"]),
         MacroScores(**data["validation_baseline"]),
-        tuple(MacroScores(**item) for item in data["validation_trials"]),
+        tuple(
+            MacroScores(**item) if item is not None else None
+            for item in data["validation_trials"]
+        ),
         MacroScores(**data["validation_final"]),
         tuple(data["labels"]),
         tuple(data["group_ids"]) if data["group_ids"] is not None else None,

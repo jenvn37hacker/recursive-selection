@@ -796,3 +796,64 @@ fits limit the interpretation of the fold-based SE; a variable reference yields
 more permissive floors. The adaptive search and repeated use of CV still require
 independent outer evaluation of the complete selection procedure. Keep Test and
 external datasets outside calibration, acceptance and model/seed tuning.
+
+### Opt-in accelerated CV selection
+
+```python
+from recursive_selection import SelectionSpeedOptions
+
+selector = RecursiveFeatureSelector(
+    model_adapter=adapter,
+    quality_policy=CVReferenceQualityPolicy(),
+    speed_options=SelectionSpeedOptions(
+        cv_jobs=2,                 # bounded by available CPU quota/affinity
+        removal_fraction=0.10,     # 0: singleton search for comparison
+        # cpu_budget=4,            # optional total CPU budget for CV
+    ),
+)
+```
+
+The original singleton implementation remains the default (`speed_options=None`).
+Acceleration requires `CVReferenceQualityPolicy` and combines four changes:
+
+1. Evaluate candidate CV **before** fitting the deployment model. Rejected
+   candidates receive no deployment fit; accepted candidates receive a fresh fit
+   for SHAP and subsequent deployment. The initial full model is still fitted or
+   reused, as before.
+2. For each metric after `m` observed folds out of `K`, calculate the maximum
+   possible full-CV mean `(sum(observed_scores) + K - m) / K`. If any upper bound
+   is below its fixed floor minus numerical tolerance, reject without fitting the
+   remaining folds. Bounds are rounded outward. A low individual fold alone is
+   not a rejection rule. Accepted candidates always complete all folds.
+3. With early rejection enabled, score one pilot fold, then evaluate the remaining
+   folds in bounded parallel waves. Bounds are checked between waves; already
+   running fits finish and are all recorded. Baseline calibration always completes
+   every fold. Model CPU threads share the configured budget, respecting quotas
+   and affinity; GPU adapters use one fold worker. CatBoost CV workers run quietly
+   so they do not flood notebook logs. Recorder callbacks remain on the caller
+   thread. Fold order and membership stay fixed.
+4. Try the lowest ascending-SHAP fraction of eligible units as a batch, capped to
+   preserve the minimum count. A failed batch is halved (rounding down, minimum
+   one) until singleton attempts are reached; batch failure does **not** mark its
+   members individually failed. Singleton failures remain ineligible only until
+   the next successful removal. Success recomputes SHAP, resets failed singleton
+   attempts and restores the fractional batch size. Selection stops at the minimum
+   count or after every remaining singleton removal fails in the current state.
+
+Batch removal changes the search path and can select different features from
+singleton elimination. It does not remove the quadratic worst case. The same
+fixed quality floors apply to every accepted batch. For a controlled comparison,
+use `removal_fraction=0.0`; `early_reject=False` disables only the bound optimization.
+
+Partial CV is represented by `CVPrunedEvaluation` with observed fold scores and
+`upper_bounds`, **without a full-CV mean/SD/SE**. Its trial `metric_kind` is
+`cv_upper_bound`; reports label those gate values as rejection upper bounds.
+Rejected CV-first trials have no outer Validation diagnostics. Batch trials record
+all `removed_group_ids`; legacy `group_id` identifies the first proposed unit.
+Retry charts/counts describe singleton failures and later singleton successes,
+not failed batches. Reports count actual CV/deployment fits and export the speed
+configuration. CV training/prediction times sum individual fold durations, which
+can overlap; total library fit time is elapsed wall time. Native bundles use
+format 5 and restore speed settings, bounds, batches and fold evidence. Formats
+1–4 remain readable. Audits replay batch backoff, singleton retry, upper-bound
+certificates and the final singleton stopping condition without fitting models.

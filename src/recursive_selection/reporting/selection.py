@@ -4,6 +4,8 @@ from dataclasses import asdict
 
 import numpy as np
 
+from ..acceleration import removed_ids
+from ..results import CVPrunedEvaluation
 from ..groups import FeatureGroups
 from ..plotting.importance import importance_evolution_data
 from ..plotting.retries import retry_history_data
@@ -100,8 +102,9 @@ class SelectionReport:
             row = {
                 "Step": trial.trial_id,
                 "Round": trial.configuration_id + 1,
-                f"{singular} tried": self.group_labels.get(
-                    trial.group_id, f"{singular} {trial.group_id}"
+                f"{singular} tried": ", ".join(
+                    self.group_labels.get(group, f"{singular} {group}")
+                    for group in removed_ids(trial)
                 ),
                 "Importance": trial.importance,
                 f"{plural} before": len(trial.groups_before),
@@ -140,11 +143,14 @@ class SelectionReport:
             for t in result.history
             if t.configuration_id == result.accepted_history[-1].configuration_id
             and not t.accepted
+            and len(removed_ids(t)) == 1
         }
         self.rejected_group_ids = tuple(
             group for group in self.groups.group_ids if group in failed
         )
-        self.attempted_group_ids = tuple(sorted({t.group_id for t in result.history}))
+        self.attempted_group_ids = tuple(
+            sorted({g for t in result.history for g in removed_ids(t)})
+        )
         self.initial_ranking = ranking_table(
             dict(result.shap_history[0].importance),
             unit_name=unit_name,
@@ -191,6 +197,7 @@ class SelectionReport:
                     **{name: row["metrics"][key] for key, name in METRIC_NAMES.items()},
                     "Worst margin (pp)": row["worst_margin_pp"],
                     "Accepted": row["accepted"],
+                    "Score kind": row["metric_kind"],
                     "Decision": (
                         "Accepted" if row["accepted"] else "Rejected - try another"
                     ),
@@ -206,6 +213,7 @@ class SelectionReport:
                 *METRIC_NAMES.values(),
                 "Worst margin (pp)",
                 "Accepted",
+                "Score kind",
                 "Decision",
             ],
         )
@@ -238,12 +246,12 @@ class SelectionReport:
                 },
                 {
                     "Stage": "Trial training",
-                    "Calls": len(result.history),
+                    "Calls": times.get("trial_model_fit_count", len(result.history)),
                     "Time (s)": times["trial_training_seconds"],
                 },
                 {
                     "Stage": "Validation prediction",
-                    "Calls": len(result.history),
+                    "Calls": times.get("trial_model_fit_count", len(result.history)),
                     "Time (s)": times["validation_prediction_seconds"],
                 },
                 {
@@ -284,7 +292,10 @@ class SelectionReport:
                     "Value": len(self.groups.group_ids)
                     - len(result.selected_group_ids),
                 },
-                {"Property": "Trial models trained", "Value": len(result.history)},
+                {
+                    "Property": "Trial models trained",
+                    "Value": times.get("trial_model_fit_count", len(result.history)),
+                },
                 {"Property": "SHAP calls", "Value": len(result.shap_history)},
                 {
                     "Property": "Final rejected " + plural.lower(),
@@ -299,7 +310,19 @@ class SelectionReport:
         )
         if result.cv_evaluation is not None:
             trace = result.cv_evaluation
-            self.trials["Score source"] = self.score_source
+            self.trials["Score source"] = [
+                (
+                    "Train CV rejection upper bound"
+                    if t.metric_kind == "cv_upper_bound"
+                    else self.score_source
+                )
+                for t in result.history
+            ]
+            self.trials["Removed IDs"] = [list(removed_ids(t)) for t in result.history]
+            self.trials["Completed folds"] = [
+                len(item.fold_scores) for item in trace.trials
+            ]
+            self.trials["Total folds"] = len(trace.folds)
             self.accepted_states["Score source"] = self.score_source
             self.cv_membership = pd.DataFrame(
                 [
@@ -324,6 +347,11 @@ class SelectionReport:
                     {
                         "Trial": trial,
                         "Fold": fold,
+                        "Evaluation": (
+                            "Pruned: no full CV mean"
+                            if isinstance(summary, CVPrunedEvaluation)
+                            else "Complete"
+                        ),
                         **{
                             label: getattr(scores, key)
                             for key, label in METRIC_NAMES.items()
@@ -356,7 +384,7 @@ class SelectionReport:
                 },
                 {
                     "Stage": "CV trial training",
-                    "Calls": len(trace.folds) * len(result.history),
+                    "Calls": sum(len(item.fold_scores) for item in trace.trials),
                     "Time (s)": times["cv_trial_training_seconds"],
                 },
                 {
@@ -411,7 +439,13 @@ class SelectionReport:
             "selected_feature_indices": list(r.selected_columns),
             "selected_feature_names": r.selected_feature_names,
             "feature_groups": self.groups.as_dict(),
-            "trial_models_trained": len(r.history),
+            "trial_models_trained": r.timings.get(
+                "trial_model_fit_count", len(r.history)
+            ),
+            "trial_candidates_evaluated": len(r.history),
+            "speed_options": r.speed_options.to_config() if r.speed_options else None,
+            "retry_evidence_scope": "Singleton rejections and later singleton acceptance; failed batches do not imply singleton failure",
+            "timing_scope": "CV training/prediction times sum fold durations, including concurrent fits; library fit is elapsed wall time",
             "shap_calls": len(r.shap_history),
             "library_stop_reason": r.stop_reason,
             "library_timings_seconds": dict(r.timings),
