@@ -1,4 +1,5 @@
 """Validation acceptance rules. They never change group or model state."""
+
 from dataclasses import asdict, dataclass
 from math import isfinite
 
@@ -14,8 +15,12 @@ class MacroQualityPolicy:
     tolerance: float = 1e-12
 
     def __post_init__(self):
-        for name in ("min_precision_macro", "min_recall_macro", "min_f1_macro",
-                     "max_drop_from_full"):
+        for name in (
+            "min_precision_macro",
+            "min_recall_macro",
+            "min_f1_macro",
+            "max_drop_from_full",
+        ):
             value = getattr(self, name)
             if not isfinite(value) or not 0 <= value <= 1:
                 raise ValueError(f"{name} must be finite and between 0 and 1.")
@@ -24,17 +29,105 @@ class MacroQualityPolicy:
 
     def thresholds(self, baseline):
         return MacroScores(
-            max(self.min_precision_macro, baseline.precision_macro - self.max_drop_from_full),
+            max(
+                self.min_precision_macro,
+                baseline.precision_macro - self.max_drop_from_full,
+            ),
             max(self.min_recall_macro, baseline.recall_macro - self.max_drop_from_full),
             max(self.min_f1_macro, baseline.f1_macro - self.max_drop_from_full),
         )
 
     def evaluate(self, scores, thresholds):
-        margins = {name: score - thresholds.as_dict()[name]
-                   for name, score in scores.as_dict().items()}
+        margins = {
+            name: score - thresholds.as_dict()[name]
+            for name, score in scores.as_dict().items()
+        }
         if not all(isfinite(value) for value in margins.values()):
             raise ValueError("Quality scores and thresholds must be finite.")
-        failed = tuple(name for name, margin in margins.items() if margin < -self.tolerance)
+        failed = tuple(
+            name for name, margin in margins.items() if margin < -self.tolerance
+        )
+        return QualityDecision(not failed, min(margins.values()), failed)
+
+    def to_config(self):
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class CVReferenceQualityPolicy:
+    """Fixed full-reference CV mean minus one fold-based standard error.
+
+    This is a baseline-anchored heuristic, not Probatus's best-path subset rule,
+    a confidence interval, or a formal non-inferiority test. Each trial is scored
+    on the same Train-only folds. There is no absolute score floor or fixed drop.
+    """
+
+    n_splits: int = 3
+    random_state: int = 42
+    se_multiplier: float = 1.0
+    tolerance: float = 1e-12
+
+    def __post_init__(self):
+        from numbers import Integral
+
+        if (
+            isinstance(self.n_splits, bool)
+            or not isinstance(self.n_splits, Integral)
+            or self.n_splits < 2
+        ):
+            raise ValueError("n_splits must be an integer >= 2.")
+        if (
+            isinstance(self.random_state, bool)
+            or not isinstance(self.random_state, Integral)
+            or self.random_state < 0
+        ):
+            raise ValueError("random_state must be a nonnegative integer.")
+        for name in ("se_multiplier", "tolerance"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative.")
+
+    def thresholds(self, baseline):
+        from .results import CVScoreSummary
+
+        if not isinstance(baseline, CVScoreSummary):
+            raise TypeError(
+                "CVReferenceQualityPolicy needs a CVScoreSummary from Train folds, not Validation scores."
+            )
+        for key in baseline.mean.as_dict():
+            mean, error = getattr(baseline.mean, key), getattr(
+                baseline.standard_error, key
+            )
+            if (
+                not isfinite(mean)
+                or not 0 <= mean <= 1
+                or not isfinite(error)
+                or error < 0
+            ):
+                raise ValueError(
+                    "CV reference means/standard errors must be finite and valid."
+                )
+        return MacroScores(
+            *(
+                max(
+                    0.0,
+                    getattr(baseline.mean, key)
+                    - self.se_multiplier * getattr(baseline.standard_error, key),
+                )
+                for key in baseline.mean.as_dict()
+            )
+        )
+
+    def evaluate(self, scores, thresholds):
+        margins = {
+            key: score - getattr(thresholds, key)
+            for key, score in scores.as_dict().items()
+        }
+        if not all(isfinite(value) for value in margins.values()):
+            raise ValueError("Quality scores and thresholds must be finite.")
+        failed = tuple(
+            key for key, margin in margins.items() if margin < -self.tolerance
+        )
         return QualityDecision(not failed, min(margins.values()), failed)
 
     def to_config(self):

@@ -1,4 +1,5 @@
 """Versioned JSON + native model files. Only built-in backends are restored."""
+
 from dataclasses import asdict
 from hashlib import sha256
 import json
@@ -10,8 +11,17 @@ import numpy as np
 
 from .backends import adapter_from_specification
 from .importance import MeanAbsoluteShapRanker
-from .policies import MacroQualityPolicy
-from .results import AcceptedState, MacroScores, SelectionResult, ShapSnapshot, TrialRecord
+from .policies import MacroQualityPolicy, CVReferenceQualityPolicy
+from .results import (
+    AcceptedState,
+    MacroScores,
+    SelectionResult,
+    ShapSnapshot,
+    TrialRecord,
+    CVFold,
+    CVScoreSummary,
+    CVEvaluationTrace,
+)
 
 
 def _encode(value):
@@ -20,14 +30,20 @@ def _encode(value):
     if isinstance(value, np.ndarray):
         return _encode(value.tolist())
     if isinstance(value, float) and not math.isfinite(value):
-        return {"__float__": "nan" if math.isnan(value) else ("inf" if value > 0 else "-inf")}
+        return {
+            "__float__": (
+                "nan" if math.isnan(value) else ("inf" if value > 0 else "-inf")
+            )
+        }
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, (tuple, list)):
         return [_encode(item) for item in value]
     if isinstance(value, dict):
         return {str(key): _encode(item) for key, item in value.items()}
-    raise TypeError(f"Cannot persist {type(value).__name__}; use JSON-compatible backend settings.")
+    raise TypeError(
+        f"Cannot persist {type(value).__name__}; use JSON-compatible backend settings."
+    )
 
 
 def _decode(value):
@@ -50,53 +66,89 @@ def _hash(path):
 
 def save_selector(selector, directory):
     from . import __version__
-    if type(selector.quality_policy) is not MacroQualityPolicy or type(selector.ranker) is not MeanAbsoluteShapRanker:
-        raise ValueError("Native save/load currently supports the standard policy and SHAP ranker only.")
+
+    if (
+        type(selector.quality_policy)
+        not in (MacroQualityPolicy, CVReferenceQualityPolicy)
+        or type(selector.ranker) is not MeanAbsoluteShapRanker
+    ):
+        raise ValueError(
+            "Native save/load supports built-in quality policies and the standard SHAP ranker only."
+        )
     if not hasattr(selector.adapter_, "specification"):
-        raise ValueError("Custom backend persistence must be implemented by the application.")
+        raise ValueError(
+            "Custom backend persistence must be implemented by the application."
+        )
     specification = selector.adapter_.specification()
     if specification["name"] not in {"catboost", "xgboost", "lightgbm"}:
         raise ValueError("Native save/load supports built-in backends only.")
     directory = Path(directory)
     if directory.exists() and any(directory.iterdir()):
-        raise FileExistsError("Choose an empty/new directory; saved selections are not overwritten.")
+        raise FileExistsError(
+            "Choose an empty/new directory; saved selections are not overwritten."
+        )
     metadata = {
-        "format_version": 3, "package_version": __version__, "python_version": platform.python_version(),
+        "format_version": 4 if selector.cv_evaluation_ is not None else 3,
+        "package_version": __version__,
+        "python_version": platform.python_version(),
         "selection_mode": selector._selection_mode,
-        "backend": specification, "policy": selector.quality_policy.to_config(),
-        "min_groups": selector.min_groups, "classes": selector.classes_.tolist(),
-        "n_features_in": selector.n_features_in_, "feature_names": selector.feature_names_in_,
+        "backend": specification,
+        "policy": selector.quality_policy.to_config(),
+        "min_groups": selector.min_groups,
+        "classes": selector.classes_.tolist(),
+        "n_features_in": selector.n_features_in_,
+        "feature_names": selector.feature_names_in_,
         "feature_groups": selector.feature_groups_.as_dict(),
-        "selected_group_ids": selector.selected_group_ids_, "selected_columns": selector.selected_columns_,
+        "selected_group_ids": selector.selected_group_ids_,
+        "selected_columns": selector.selected_columns_,
         "selected_feature_names": selector.selected_feature_names_,
         "baseline_metrics": asdict(selector.baseline_metrics_),
-        "effective_floors": asdict(selector.effective_floors_), "final_metrics": asdict(selector.final_metrics_),
-        "history": selector.history_records(), "accepted_history": [asdict(x) for x in selector.accepted_history_],
+        "effective_floors": asdict(selector.effective_floors_),
+        "final_metrics": asdict(selector.final_metrics_),
+        "history": selector.history_records(),
+        "accepted_history": [asdict(x) for x in selector.accepted_history_],
         "shap_history": [asdict(x) for x in selector.shap_history_],
-        "timings": selector.timings_, "stop_reason": selector.stop_reason_,
+        "timings": selector.timings_,
+        "stop_reason": selector.stop_reason_,
         "attempted_group_ids": selector.attempted_group_ids_,
         "rejected_group_ids": selector.rejected_group_ids_,
         "model_file": selector.adapter_.model_filename,
     }
+    if selector.cv_evaluation_ is not None:
+        from .cross_validation import validate_cv_trace
+
+        validate_cv_trace(selector.result_, selector.quality_policy)
+        metadata.update(
+            policy_type="cv_reference", cv_evaluation=asdict(selector.cv_evaluation_)
+        )
     # Validate serialization before writing any files.
     encoded = _encode(metadata)
     directory.mkdir(parents=True, exist_ok=True)
     model_path = directory / metadata["model_file"]
     selector.adapter_.save_model(selector.estimator_, model_path)
     encoded["model_sha256"] = _hash(model_path)
-    (directory / "selection.json").write_text(json.dumps(encoded, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    (directory / "selection.json").write_text(
+        json.dumps(encoded, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+    )
     return directory
 
 
 def load_selector(directory):
     from .groups import FeatureGroups
     from .selector import RecursiveFeatureSelector, RecursiveGroupSelector
+
     directory = Path(directory)
-    data = _decode(json.loads((directory / "selection.json").read_text(encoding="utf-8")))
+    data = _decode(
+        json.loads((directory / "selection.json").read_text(encoding="utf-8"))
+    )
     data = _migrate_metadata(data)
-    if data["format_version"] not in (2, 3):
+    if data["format_version"] not in (2, 3, 4):
         raise ValueError("Unsupported selection metadata version.")
-    mode = data.get("selection_mode", "group") if data["format_version"] == 2 else data.get("selection_mode")
+    mode = (
+        data.get("selection_mode", "group")
+        if data["format_version"] == 2
+        else data.get("selection_mode")
+    )
     if mode not in {"group", "feature"}:
         raise ValueError("Unsupported saved selection mode.")
     adapter = adapter_from_specification(data["backend"])
@@ -107,14 +159,26 @@ def load_selector(directory):
     if _hash(model_path) != data["model_sha256"]:
         raise ValueError("Saved model hash differs from selection metadata.")
     model = adapter.load_model(model_path, data["classes"])
-    groups = FeatureGroups({int(k): v for k, v in data["feature_groups"].items()}, data["n_features_in"])
-    if mode == "feature" and groups.as_dict() != {column + 1: [column] for column in range(data["n_features_in"])}:
-        raise ValueError("Saved feature selection must contain one singleton group per original column.")
+    groups = FeatureGroups(
+        {int(k): v for k, v in data["feature_groups"].items()}, data["n_features_in"]
+    )
+    if mode == "feature" and groups.as_dict() != {
+        column + 1: [column] for column in range(data["n_features_in"])
+    }:
+        raise ValueError(
+            "Saved feature selection must contain one singleton group per original column."
+        )
     group_ids = tuple(data["selected_group_ids"])
-    if (len(group_ids) != len(set(group_ids)) or not set(group_ids).issubset(groups.group_ids)
-            or not group_ids or groups.columns(group_ids) != tuple(data["selected_columns"])):
+    if (
+        len(group_ids) != len(set(group_ids))
+        or not set(group_ids).issubset(groups.group_ids)
+        or not group_ids
+        or groups.columns(group_ids) != tuple(data["selected_columns"])
+    ):
         raise ValueError("Saved group IDs do not match the selected column schema.")
-    RecursiveGroupSelector._check_model(adapter, model, len(data["selected_columns"]), np.asarray(data["classes"]))
+    RecursiveGroupSelector._check_model(
+        adapter, model, len(data["selected_columns"]), np.asarray(data["classes"])
+    )
     history = []
     for item in data["history"]:
         item = dict(item)
@@ -123,23 +187,76 @@ def load_selector(directory):
         item["metrics"] = MacroScores(**item["metrics"])
         item["change_from_full"] = MacroScores(**item["change_from_full"])
         history.append(TrialRecord(**item))
-    accepted = tuple(AcceptedState(x["configuration_id"], x["trial_id"], tuple(x["group_ids"]), MacroScores(**x["metrics"]))
-                     for x in data["accepted_history"])
-    snapshots = tuple(ShapSnapshot(x["configuration_id"], x["trial_id"], tuple(x["group_ids"]),
-                                   tuple((int(k), float(v)) for k, v in x["importance"]))
-                      for x in data["shap_history"])
+    accepted = tuple(
+        AcceptedState(
+            x["configuration_id"],
+            x["trial_id"],
+            tuple(x["group_ids"]),
+            MacroScores(**x["metrics"]),
+        )
+        for x in data["accepted_history"]
+    )
+    snapshots = tuple(
+        ShapSnapshot(
+            x["configuration_id"],
+            x["trial_id"],
+            tuple(x["group_ids"]),
+            tuple((int(k), float(v)) for k, v in x["importance"]),
+        )
+        for x in data["shap_history"]
+    )
     names = tuple(data["feature_names"]) if data["feature_names"] is not None else None
-    selected_names = tuple(data["selected_feature_names"]) if data["selected_feature_names"] is not None else None
-    if names is not None and (len(names) != data["n_features_in"] or
-                             tuple(names[c] for c in data["selected_columns"]) != selected_names):
+    selected_names = (
+        tuple(data["selected_feature_names"])
+        if data["selected_feature_names"] is not None
+        else None
+    )
+    if names is not None and (
+        len(names) != data["n_features_in"]
+        or tuple(names[c] for c in data["selected_columns"]) != selected_names
+    ):
         raise ValueError("Saved feature names do not match the selected column schema.")
-    result = SelectionResult(model, group_ids, tuple(data["selected_columns"]), selected_names,
-                             MacroScores(**data["baseline_metrics"]), MacroScores(**data["effective_floors"]),
-                             MacroScores(**data["final_metrics"]), tuple(history), accepted, snapshots,
-                             data["timings"], data["stop_reason"])
-    selector_class = RecursiveFeatureSelector if mode == "feature" else RecursiveGroupSelector
-    minimum = {"min_features" if mode == "feature" else "min_groups": data["min_groups"]}
-    selector = selector_class(model_adapter=adapter, quality_policy=MacroQualityPolicy(**data["policy"]), **minimum)
+    policy_name = data.get("policy_type", "macro")
+    if data["format_version"] == 4 and policy_name != "cv_reference":
+        raise ValueError("Format 4 requires CV policy metadata.")
+    if policy_name not in {"macro", "cv_reference"}:
+        raise ValueError("Unknown saved quality policy.")
+    policy = (
+        CVReferenceQualityPolicy(**data["policy"])
+        if policy_name == "cv_reference"
+        else MacroQualityPolicy(**data["policy"])
+    )
+    cv_trace = (
+        _restore_cv_trace(data["cv_evaluation"])
+        if policy_name == "cv_reference"
+        else None
+    )
+    result = SelectionResult(
+        model,
+        group_ids,
+        tuple(data["selected_columns"]),
+        selected_names,
+        MacroScores(**data["baseline_metrics"]),
+        MacroScores(**data["effective_floors"]),
+        MacroScores(**data["final_metrics"]),
+        tuple(history),
+        accepted,
+        snapshots,
+        data["timings"],
+        data["stop_reason"],
+        cv_trace,
+    )
+    if cv_trace is not None:
+        from .cross_validation import validate_cv_trace
+
+        validate_cv_trace(result, policy)
+    selector_class = (
+        RecursiveFeatureSelector if mode == "feature" else RecursiveGroupSelector
+    )
+    minimum = {
+        "min_features" if mode == "feature" else "min_groups": data["min_groups"]
+    }
+    selector = selector_class(model_adapter=adapter, quality_policy=policy, **minimum)
     selector.adapter_ = adapter
     # Only the final model is persisted. The original full model is not restored.
     selector.full_model_ = None
@@ -160,21 +277,58 @@ def _migrate_metadata(data):
     if data.get("format_version") != 1:
         return data
     names = {
-        "min_sensors": "min_groups", "sensor_groups": "feature_groups",
-        "selected_sensor_ids": "selected_group_ids", "sensor_id": "group_id",
-        "sensor_ids": "group_ids", "sensors_before": "groups_before",
+        "min_sensors": "min_groups",
+        "sensor_groups": "feature_groups",
+        "selected_sensor_ids": "selected_group_ids",
+        "sensor_id": "group_id",
+        "sensor_ids": "group_ids",
+        "sensors_before": "groups_before",
         "proposed_sensors": "proposed_groups",
         "attempted_sensor_ids": "attempted_group_ids",
         "rejected_sensor_ids": "rejected_group_ids",
     }
+
     def convert(value):
         if isinstance(value, dict):
             return {names.get(key, key): convert(item) for key, item in value.items()}
         if isinstance(value, list):
             return [convert(item) for item in value]
         return value
+
     migrated = convert(data)
     migrated["format_version"] = 2
     if migrated.get("stop_reason") == "min_sensors_reached":
         migrated["stop_reason"] = "min_groups_reached"
     return migrated
+
+
+def _restore_cv_trace(data):
+    def summary(value):
+        return CVScoreSummary(
+            tuple(MacroScores(**score) for score in value["fold_scores"]),
+            MacroScores(**value["mean"]),
+            MacroScores(**value["standard_deviation"]),
+            MacroScores(**value["standard_error"]),
+            value["training_seconds"],
+            value["prediction_seconds"],
+        )
+
+    return CVEvaluationTrace(
+        tuple(
+            CVFold(
+                tuple(fold["train_rows"]),
+                tuple(fold["stopping_rows"]),
+                tuple(fold["heldout_rows"]),
+            )
+            for fold in data["folds"]
+        ),
+        data["grouped"],
+        summary(data["baseline"]),
+        tuple(summary(item) for item in data["trials"]),
+        summary(data["final"]),
+        MacroScores(**data["validation_baseline"]),
+        tuple(MacroScores(**item) for item in data["validation_trials"]),
+        MacroScores(**data["validation_final"]),
+        tuple(data["labels"]),
+        tuple(data["group_ids"]) if data["group_ids"] is not None else None,
+    )

@@ -1,4 +1,5 @@
 """Shared recursive elimination engine with group and individual-feature APIs."""
+
 from copy import deepcopy
 from numbers import Integral
 from time import perf_counter
@@ -7,8 +8,16 @@ import numpy as np
 
 from .groups import FeatureGroups, labels, numeric_matrix
 from .importance import MeanAbsoluteShapRanker
-from .policies import MacroQualityPolicy
-from .results import AcceptedState, MacroScores, SelectionResult, ShapSnapshot, TrialRecord
+from .policies import MacroQualityPolicy, CVReferenceQualityPolicy
+from .cross_validation import make_folds, evaluate_folds
+from .results import (
+    AcceptedState,
+    MacroScores,
+    SelectionResult,
+    ShapSnapshot,
+    TrialRecord,
+    CVEvaluationTrace,
+)
 
 
 class _RecursiveSelectorBase:
@@ -16,15 +25,28 @@ class _RecursiveSelectorBase:
 
     _selection_mode = "group"
 
-    def __init__(self, *, model_adapter, ranker=None,
-                 quality_policy=None, min_groups=1, recorder=None):
+    def __init__(
+        self,
+        *,
+        model_adapter,
+        ranker=None,
+        quality_policy=None,
+        min_groups=1,
+        recorder=None,
+    ):
         if model_adapter is None:
             raise ValueError("model_adapter is required.")
-        if isinstance(min_groups, bool) or not isinstance(min_groups, Integral) or min_groups < 1:
+        if (
+            isinstance(min_groups, bool)
+            or not isinstance(min_groups, Integral)
+            or min_groups < 1
+        ):
             raise ValueError("min_groups must be a positive integer.")
         self.model_adapter = model_adapter
         self.ranker = ranker if ranker is not None else MeanAbsoluteShapRanker()
-        self.quality_policy = quality_policy if quality_policy is not None else MacroQualityPolicy()
+        self.quality_policy = (
+            quality_policy if quality_policy is not None else MacroQualityPolicy()
+        )
         self.min_groups = int(min_groups)
         self.recorder = recorder
         self._is_fitted = False
@@ -34,7 +56,9 @@ class _RecursiveSelectorBase:
             self.recorder.record(deepcopy({"event": kind, **payload}))
 
     def _rank(self, adapter, model, X, y, feature_groups, group_ids):
-        scores = dict(self.ranker.rank(adapter, model, X, y, feature_groups.relative(group_ids)))
+        scores = dict(
+            self.ranker.rank(adapter, model, X, y, feature_groups.relative(group_ids))
+        )
         if set(scores) != set(group_ids):
             raise ValueError("Ranker must return exactly the retained group IDs.")
         scores = {group: float(scores[group]) for group in group_ids}
@@ -45,18 +69,37 @@ class _RecursiveSelectorBase:
     @staticmethod
     def _check_model(adapter, model, n_features, expected_classes=None):
         if adapter.feature_count(model) != n_features:
-            raise ValueError("Fitted model feature count differs from the candidate schema.")
+            raise ValueError(
+                "Fitted model feature count differs from the candidate schema."
+            )
         classes = np.asarray(adapter.classes(model)).reshape(-1)
         if len(classes) < 2 or len(np.unique(classes)) != len(classes):
-            raise ValueError("A classification model with at least two distinct classes is required.")
-        if expected_classes is not None and not np.array_equal(classes, expected_classes):
-            raise ValueError("Candidate model classes/order differ from the full model.")
+            raise ValueError(
+                "A classification model with at least two distinct classes is required."
+            )
+        if expected_classes is not None and not np.array_equal(
+            classes, expected_classes
+        ):
+            raise ValueError(
+                "Candidate model classes/order differ from the full model."
+            )
         return classes
 
-    def _fit(self, X_train, y_train, *, eval_set, feature_groups, feature_names=None, full_model=None):
+    def _fit(
+        self,
+        X_train,
+        y_train,
+        *,
+        eval_set,
+        feature_groups,
+        feature_names=None,
+        full_model=None,
+        cv_groups=None,
+    ):
         """Fit the entire search. Existing estimators/inputs are never retrained in place.
 
         feature_names is optional for arrays and inferred for named DataFrames.
+        cv_groups optionally supplies Train recording IDs for the CV gate only.
         full_model must already be fitted with the same input columns, labels,
         model parameters and training protocol. The caller owns its provenance.
         """
@@ -67,12 +110,20 @@ class _RecursiveSelectorBase:
         names = tuple(feature_names) if feature_names is not None else None
         X = numeric_matrix(X_train, name="X_train", feature_names=names)
         if names is not None:
-            if len(names) != X.shape[1] or any(not isinstance(n, str) for n in names) or len(set(names)) != len(names):
-                raise ValueError("feature_names must be unique strings, one per original column.")
+            if (
+                len(names) != X.shape[1]
+                or any(not isinstance(n, str) for n in names)
+                or len(set(names)) != len(names)
+            ):
+                raise ValueError(
+                    "feature_names must be unique strings, one per original column."
+                )
         y = labels(y_train, name="y_train", n_samples=len(X))
         if not isinstance(eval_set, (tuple, list)) or len(eval_set) != 2:
             raise ValueError("eval_set must be the pair (X_val, y_val).")
-        X_val = numeric_matrix(eval_set[0], name="X_val", n_features=X.shape[1], feature_names=names)
+        X_val = numeric_matrix(
+            eval_set[0], name="X_val", n_features=X.shape[1], feature_names=names
+        )
         y_val = labels(eval_set[1], name="y_val", n_samples=len(X_val))
         if feature_groups is None:
             feature_groups = {column + 1: [column] for column in range(X.shape[1])}
@@ -80,14 +131,30 @@ class _RecursiveSelectorBase:
         if self.min_groups > len(groups.group_ids):
             if self._selection_mode == "feature":
                 raise ValueError("min_features exceeds the number of input features.")
-            raise ValueError("min_groups exceeds the number of supplied feature groups.")
+            raise ValueError(
+                "min_groups exceeds the number of supplied feature groups."
+            )
         train_classes = np.unique(y)
         if len(train_classes) < 2 or not np.isin(y_val, train_classes).all():
-            raise ValueError("Training needs at least two classes; validation labels must be known.")
+            raise ValueError(
+                "Training needs at least two classes; validation labels must be known."
+            )
         adapter = self.model_adapter
-        timings = {"full_training_seconds": 0.0, "baseline_prediction_seconds": 0.0,
-                   "initial_shap_seconds": 0.0, "trial_training_seconds": 0.0,
-                   "validation_prediction_seconds": 0.0, "shap_update_seconds": 0.0}
+        cv_mode = isinstance(self.quality_policy, CVReferenceQualityPolicy)
+        if cv_groups is not None and not cv_mode:
+            raise ValueError("cv_groups requires CVReferenceQualityPolicy.")
+        cv_folds, validated_cv_groups = (
+            make_folds(X, y, self.quality_policy, cv_groups) if cv_mode else ((), None)
+        )
+        cv_trials, validation_trials = [], []
+        timings = {
+            "full_training_seconds": 0.0,
+            "baseline_prediction_seconds": 0.0,
+            "initial_shap_seconds": 0.0,
+            "trial_training_seconds": 0.0,
+            "validation_prediction_seconds": 0.0,
+            "shap_update_seconds": 0.0,
+        }
         self._emit("run_started", group_ids=groups.group_ids)
         if full_model is None:
             full_model = adapter.new_model()
@@ -98,13 +165,42 @@ class _RecursiveSelectorBase:
             adapter.validate_full_model(full_model)
         classes = self._check_model(adapter, full_model, X.shape[1])
         if set(classes.tolist()) != set(train_classes.tolist()):
-            raise ValueError("full_model class labels differ from the supplied training labels.")
+            raise ValueError(
+                "full_model class labels differ from the supplied training labels."
+            )
         tick = perf_counter()
-        baseline = MacroScores.from_predictions(y_val, adapter.predict(full_model, X_val), classes)
+        baseline = MacroScores.from_predictions(
+            y_val, adapter.predict(full_model, X_val), classes
+        )
         timings["baseline_prediction_seconds"] = perf_counter() - tick
-        floors = self.quality_policy.thresholds(baseline)
+        validation_baseline = baseline
+        validation_final = baseline
+        cv_baseline = cv_current = None
+        if cv_mode:
+            cv_baseline = evaluate_folds(
+                adapter,
+                X,
+                y,
+                cv_folds,
+                classes,
+                check_model=self._check_model,
+                forbidden_models=(full_model,),
+                emit=self._emit,
+            )
+            cv_current = cv_baseline
+            baseline = cv_baseline.mean
+            timings.update(
+                cv_baseline_training_seconds=cv_baseline.training_seconds,
+                cv_baseline_prediction_seconds=cv_baseline.prediction_seconds,
+                cv_trial_training_seconds=0.0,
+                cv_trial_prediction_seconds=0.0,
+                cv_fit_count=len(cv_folds),
+            )
+        floors = self.quality_policy.thresholds(cv_baseline if cv_mode else baseline)
         if not self.quality_policy.evaluate(baseline, floors).passed:
-            raise ValueError("Full model does not meet the fixed validation floors; selection did not start.")
+            raise ValueError(
+                "Full model does not meet the fixed validation floors; selection did not start."
+            )
         current_model = full_model
         current_groups = groups.group_ids
         current_scores = baseline
@@ -117,7 +213,13 @@ class _RecursiveSelectorBase:
         history = []
         accepted = [AcceptedState(0, 0, current_groups, baseline)]
         snapshots = [ShapSnapshot(0, 0, current_groups, tuple(ranking.items()))]
-        self._emit("initialized", baseline=baseline.as_dict(), floors=floors.as_dict(), ranking=ranking)
+        self._emit(
+            "initialized",
+            baseline=baseline.as_dict(),
+            floors=floors.as_dict(),
+            ranking=ranking,
+            score_source="train_cv" if cv_mode else "validation",
+        )
         loop_started = perf_counter()
         configuration_id = 0
         while True:
@@ -137,8 +239,14 @@ class _RecursiveSelectorBase:
             trial_model = adapter.new_model()
             if trial_model is current_model or trial_model is full_model:
                 raise ValueError("Backend must return a fresh model for every trial.")
-            self._emit("trial_started", trial_id=trial_id, configuration_id=configuration_id,
-                       group_id=group, groups_before=current_groups, proposed_groups=proposed)
+            self._emit(
+                "trial_started",
+                trial_id=trial_id,
+                configuration_id=configuration_id,
+                group_id=group,
+                groups_before=current_groups,
+                proposed_groups=proposed,
+            )
             tick = perf_counter()
             # Training/prediction errors propagate; they are never metric rejections.
             adapter.fit(trial_model, X_candidate, y, (X_val_candidate, y_val))
@@ -150,13 +258,47 @@ class _RecursiveSelectorBase:
             predict_seconds = perf_counter() - tick
             timings["validation_prediction_seconds"] += predict_seconds
             scores = MacroScores.from_predictions(y_val, predictions, classes)
+            validation_scores = scores
+            if cv_mode:
+                cv_trial = evaluate_folds(
+                    adapter,
+                    X_candidate,
+                    y,
+                    cv_folds,
+                    classes,
+                    check_model=self._check_model,
+                    forbidden_models=(full_model, current_model, trial_model),
+                    emit=self._emit,
+                    trial_id=trial_id,
+                )
+                cv_trials.append(cv_trial)
+                validation_trials.append(validation_scores)
+                timings["cv_trial_training_seconds"] += cv_trial.training_seconds
+                timings["cv_trial_prediction_seconds"] += cv_trial.prediction_seconds
+                timings["cv_fit_count"] += len(cv_folds)
+                scores = cv_trial.mean
             decision = self.quality_policy.evaluate(scores, floors)
-            changes = MacroScores(*(scores.as_dict()[name] - baseline.as_dict()[name]
-                                    for name in baseline.as_dict()))
-            trial = TrialRecord(trial_id, configuration_id, group, current_groups, proposed,
-                                ranking[group], scores, changes, decision.passed,
-                                decision.worst_margin, decision.failed_metrics,
-                                train_seconds, predict_seconds)
+            changes = MacroScores(
+                *(
+                    scores.as_dict()[name] - baseline.as_dict()[name]
+                    for name in baseline.as_dict()
+                )
+            )
+            trial = TrialRecord(
+                trial_id,
+                configuration_id,
+                group,
+                current_groups,
+                proposed,
+                ranking[group],
+                scores,
+                changes,
+                decision.passed,
+                decision.worst_margin,
+                decision.failed_metrics,
+                train_seconds,
+                predict_seconds,
+            )
             history.append(trial)
             attempted.add(group)
             self._emit("trial_completed", **trial.as_dict())
@@ -166,24 +308,77 @@ class _RecursiveSelectorBase:
             current_groups = proposed
             current_model = trial_model
             current_scores = scores
+            validation_final = validation_scores
+            if cv_mode:
+                cv_current = cv_trial
             failed.clear()
             configuration_id += 1
-            accepted.append(AcceptedState(configuration_id, trial_id, current_groups, scores))
+            accepted.append(
+                AcceptedState(configuration_id, trial_id, current_groups, scores)
+            )
             tick = perf_counter()
-            ranking = self._rank(adapter, current_model, X_candidate, y, groups, current_groups)
+            ranking = self._rank(
+                adapter, current_model, X_candidate, y, groups, current_groups
+            )
             timings["shap_update_seconds"] += perf_counter() - tick
-            snapshots.append(ShapSnapshot(configuration_id, trial_id, current_groups, tuple(ranking.items())))
-            self._emit("configuration_accepted", configuration_id=configuration_id,
-                       trial_id=trial_id, group_ids=current_groups, ranking=ranking)
+            snapshots.append(
+                ShapSnapshot(
+                    configuration_id, trial_id, current_groups, tuple(ranking.items())
+                )
+            )
+            self._emit(
+                "configuration_accepted",
+                configuration_id=configuration_id,
+                trial_id=trial_id,
+                group_ids=current_groups,
+                ranking=ranking,
+            )
         timings["elimination_loop_seconds"] = perf_counter() - loop_started
         timings["total_fit_seconds"] = perf_counter() - started
         columns = groups.columns(current_groups)
         selected_names = tuple(names[c] for c in columns) if names is not None else None
-        result = SelectionResult(current_model, current_groups, columns, selected_names, baseline,
-                                 floors, current_scores, tuple(history), tuple(accepted),
-                                 tuple(snapshots), dict(timings), stop_reason)
-        self._emit("run_finished", group_ids=current_groups, stop_reason=stop_reason,
-                   trial_count=len(history), shap_calls=len(snapshots))
+        cv_trace = (
+            CVEvaluationTrace(
+                cv_folds,
+                validated_cv_groups is not None,
+                cv_baseline,
+                tuple(cv_trials),
+                cv_current,
+                validation_baseline,
+                tuple(validation_trials),
+                validation_final,
+                tuple(y.tolist()),
+                (
+                    tuple(validated_cv_groups.tolist())
+                    if validated_cv_groups is not None
+                    else None
+                ),
+            )
+            if cv_mode
+            else None
+        )
+        result = SelectionResult(
+            current_model,
+            current_groups,
+            columns,
+            selected_names,
+            baseline,
+            floors,
+            current_scores,
+            tuple(history),
+            tuple(accepted),
+            tuple(snapshots),
+            dict(timings),
+            stop_reason,
+            cv_trace,
+        )
+        self._emit(
+            "run_finished",
+            group_ids=current_groups,
+            stop_reason=stop_reason,
+            trial_count=len(history),
+            shap_calls=len(snapshots),
+        )
         self.adapter_ = adapter
         self.full_model_ = full_model
         self.classes_ = classes.copy()
@@ -199,6 +394,7 @@ class _RecursiveSelectorBase:
 
     def _set_result(self, result):
         self.result_ = result
+        self.cv_evaluation_ = result.cv_evaluation
         self.estimator_ = result.estimator
         self.selected_group_ids_ = result.selected_group_ids
         self.selected_columns_ = result.selected_columns
@@ -215,20 +411,31 @@ class _RecursiveSelectorBase:
 
     def _check_fitted(self):
         if not self._is_fitted:
-            raise RuntimeError("Call fit() successfully or load() a saved selector first.")
+            raise RuntimeError(
+                "Call fit() successfully or load() a saved selector first."
+            )
 
     def transform(self, X):
         """Select retained columns from the complete original feature schema."""
         self._check_fitted()
-        matrix = numeric_matrix(X, name="X", n_features=self.n_features_in_,
-                                feature_names=self.feature_names_in_)
+        matrix = numeric_matrix(
+            X,
+            name="X",
+            n_features=self.n_features_in_,
+            feature_names=self.feature_names_in_,
+        )
         return matrix[:, self.selected_columns_]
 
     def predict(self, X):
         """Predict from the full original input schema, selecting columns internally."""
         selected = self.transform(X)
-        predictions = np.asarray(self.adapter_.predict(self.estimator_, selected)).reshape(-1)
-        if len(predictions) != len(selected) or not np.isin(predictions, self.classes_).all():
+        predictions = np.asarray(
+            self.adapter_.predict(self.estimator_, selected)
+        ).reshape(-1)
+        if (
+            len(predictions) != len(selected)
+            or not np.isin(predictions, self.classes_).all()
+        ):
             raise ValueError("Backend returned invalid prediction rows or classes.")
         return predictions
 
@@ -239,15 +446,19 @@ class _RecursiveSelectorBase:
     def save(self, directory):
         """Save native model + explicit schema/history; does not pickle Python objects."""
         from .persistence import save_selector
+
         self._check_fitted()
         return save_selector(self, directory)
 
     @classmethod
     def load(cls, directory):
         from .persistence import load_selector
+
         selector = load_selector(directory)
         if selector._selection_mode != cls._selection_mode:
-            raise ValueError(f"Saved selection uses {selector._selection_mode} mode; load with {type(selector).__name__}.")
+            raise ValueError(
+                f"Saved selection uses {selector._selection_mode} mode; load with {type(selector).__name__}."
+            )
         return selector
 
 
@@ -259,7 +470,17 @@ class RecursiveGroupSelector(_RecursiveSelectorBase):
     Test data must not be passed as eval_set.
     """
 
-    def fit(self, X_train, y_train, *, eval_set, feature_groups, feature_names=None, full_model=None):
+    def fit(
+        self,
+        X_train,
+        y_train,
+        *,
+        eval_set,
+        feature_groups,
+        feature_names=None,
+        full_model=None,
+        cv_groups=None,
+    ):
         """Select groups; preserve the original column order within each refit.
 
         feature_names is inferred for DataFrames. An optional full_model must be
@@ -267,9 +488,18 @@ class RecursiveGroupSelector(_RecursiveSelectorBase):
         """
         if feature_groups is None:
             self._is_fitted = False
-            raise ValueError("Supply feature_groups, or use RecursiveFeatureSelector for individual columns.")
-        return self._fit(X_train, y_train, eval_set=eval_set, feature_groups=feature_groups,
-                         feature_names=feature_names, full_model=full_model)
+            raise ValueError(
+                "Supply feature_groups, or use RecursiveFeatureSelector for individual columns."
+            )
+        return self._fit(
+            X_train,
+            y_train,
+            eval_set=eval_set,
+            feature_groups=feature_groups,
+            feature_names=feature_names,
+            full_model=full_model,
+            cv_groups=cv_groups,
+        )
 
 
 class RecursiveFeatureSelector(_RecursiveSelectorBase):
@@ -283,23 +513,55 @@ class RecursiveFeatureSelector(_RecursiveSelectorBase):
 
     _selection_mode = "feature"
 
-    def __init__(self, *, model_adapter, ranker=None, quality_policy=None,
-                 min_features=1, recorder=None):
-        if isinstance(min_features, bool) or not isinstance(min_features, Integral) or min_features < 1:
+    def __init__(
+        self,
+        *,
+        model_adapter,
+        ranker=None,
+        quality_policy=None,
+        min_features=1,
+        recorder=None,
+    ):
+        if (
+            isinstance(min_features, bool)
+            or not isinstance(min_features, Integral)
+            or min_features < 1
+        ):
             raise ValueError("min_features must be a positive integer.")
-        super().__init__(model_adapter=model_adapter, ranker=ranker,
-                         quality_policy=quality_policy, min_groups=min_features, recorder=recorder)
+        super().__init__(
+            model_adapter=model_adapter,
+            ranker=ranker,
+            quality_policy=quality_policy,
+            min_groups=min_features,
+            recorder=recorder,
+        )
 
     @property
     def min_features(self):
         """Minimum column count; identical to the shared singleton-group minimum."""
         return self.min_groups
 
-    def fit(self, X_train, y_train, *, eval_set, feature_names=None, full_model=None):
+    def fit(
+        self,
+        X_train,
+        y_train,
+        *,
+        eval_set,
+        feature_names=None,
+        full_model=None,
+        cv_groups=None,
+    ):
         """Select individual features without requiring a feature_groups mapping.
 
         feature_names is inferred for DataFrames. full_model has the same reuse
         requirements as in RecursiveGroupSelector.fit().
         """
-        return self._fit(X_train, y_train, eval_set=eval_set, feature_groups=None,
-                         feature_names=feature_names, full_model=full_model)
+        return self._fit(
+            X_train,
+            y_train,
+            eval_set=eval_set,
+            feature_groups=None,
+            feature_names=feature_names,
+            full_model=full_model,
+            cv_groups=cv_groups,
+        )

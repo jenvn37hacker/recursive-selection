@@ -1,4 +1,5 @@
 """Serializable records, independent of any boosting library."""
+
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -16,9 +17,15 @@ class MacroScores:
     def from_predictions(cls, y, predictions, classes):
         predicted = np.asarray(predictions).reshape(-1)
         if len(predicted) != len(y) or not np.isin(predicted, classes).all():
-            raise ValueError("Predictions must match validation rows and known classes.")
+            raise ValueError(
+                "Predictions must match validation rows and known classes."
+            )
         precision, recall, f1, _ = precision_recall_fscore_support(
-            y, predicted, labels=classes, average=None, zero_division=0,
+            y,
+            predicted,
+            labels=classes,
+            average=None,
+            zero_division=0,
         )
         return cls(float(precision.mean()), float(recall.mean()), float(f1.mean()))
 
@@ -84,3 +91,37 @@ class SelectionResult:
     shap_history: tuple[ShapSnapshot, ...]
     timings: dict[str, float]
     stop_reason: str
+    cv_evaluation: "CVEvaluationTrace | None" = None
+
+
+@dataclass(frozen=True)
+class CVFold:
+    """Train-local row indices; stopping rows never overlap scored held-out rows."""
+
+    train_rows: tuple[int, ...]
+    stopping_rows: tuple[int, ...]
+    heldout_rows: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class CVScoreSummary:
+    fold_scores: tuple[MacroScores, ...]
+    mean: MacroScores
+    standard_deviation: MacroScores
+    standard_error: MacroScores
+    training_seconds: float = 0.0
+    prediction_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
+class CVEvaluationTrace:
+    folds: tuple[CVFold, ...]
+    grouped: bool
+    baseline: CVScoreSummary
+    trials: tuple[CVScoreSummary, ...]
+    final: CVScoreSummary
+    validation_baseline: MacroScores
+    validation_trials: tuple[MacroScores, ...]
+    validation_final: MacroScores
+    labels: tuple = ()
+    group_ids: tuple | None = None

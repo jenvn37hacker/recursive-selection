@@ -720,3 +720,79 @@ The existing `BootstrapComparison.save` and plotting APIs remain unchanged.
 Audits replay the recorded greedy rules, larger-ID importance ties and rejection
 reset, including minimum-group stopping and no-removal runs. They do not establish
 data provenance, independence or a global minimum.
+
+## Automatic full-reference CV quality gate
+
+`CVReferenceQualityPolicy` is an opt-in alternative to manual absolute floors and
+maximum drops. `MacroQualityPolicy` and its existing defaults remain supported.
+
+```python
+from recursive_selection import (
+    RecursiveFeatureSelector, CatBoostAdapter, CVReferenceQualityPolicy,
+)
+
+selector = RecursiveFeatureSelector(
+    model_adapter=CatBoostAdapter(
+        params={"iterations": 1000, "depth": 5, "learning_rate": 0.03,
+                "loss_function": "MultiClass", "random_seed": 42,
+                "verbose": False, "allow_writing_files": False},
+    ),
+    quality_policy=CVReferenceQualityPolicy(n_splits=3, random_state=42),
+)
+selector.fit(
+    X_train, y_train, eval_set=(X_val, y_val),
+    feature_names=feature_names,
+    cv_groups=train_recording_ids,  # omit only when recording/group IDs are unavailable
+    # full_model=already_fitted_reference,  # same schema/parameters/protocol required
+)
+```
+
+For each macro metric independently, the selector fits a full-feature CV reference
+and fixes `max(0, full_cv_mean - se_multiplier * full_cv_se)`. The default multiplier
+is 1.0. SE is the sample standard deviation (`ddof=1`) of the fold scores divided
+by the square root of the number of folds. Every proposed removal uses the same
+fold membership and must pass all three fixed thresholds. Reject/retry, SHAP
+updates after acceptance and original-column ordering are unchanged. Thresholds
+are never recomputed from an accepted candidate.
+
+CV sees **Train rows only**. The outer Validation set still controls early
+stopping for the full reference and each deployment candidate, but its scores do
+not determine CV-gate acceptance. Within each CV fold, the fitting pool is split
+again into fit and stopping rows. Scored held-out rows never enter early stopping.
+The sample split reserves approximately 25% of the fitting pool for stopping.
+Grouped CV uses a class-complete grouped stopping split with up to four partitions
+(fewer for small group counts), preserving group disjointness among fit, stopping
+and held-out sets. All three sets must contain every training class; insufficient
+samples/groups raise an error instead of silently falling back to sample splits.
+
+`cv_groups` refers to **original recording/group IDs for Train rows**, not feature
+groups or invented IDs. Supplied groups are kept disjoint in both levels of CV.
+Without them, the design is stratified sample-level CV and cannot establish
+recording independence. CV groups require the CV policy; the original macro
+policy does not silently ignore them.
+
+The CV reference and every trial add `n_splits` fresh model fits, in addition to
+the original full/candidate fits. CV models are discarded, and native SHAP ranking
+continues to explain the accepted deployment model. Fold membership, per-fold
+scores, sample SD/SE, timing and outer Validation diagnostics are available through
+`selector.cv_evaluation_` and exported by `SelectionReport` as CV membership,
+fold-score and gate-constraint tables. In this mode `baseline_metrics_`,
+`final_metrics_`, trial metrics and acceptance plots mean **Train CV mean**, not
+outer Validation performance. Outer Validation scores remain separate diagnostics.
+`SelectionReport.cv_constraints` displays the appropriate gate comparison;
+`EvaluationComparison.validation_constraints` refuses to mislabel outer Validation
+scores as CV gate scores.
+
+Built-in native save/load supports the CV policy with format 4, including fixed
+membership and all CV evidence. Existing macro-policy formats 1–3 remain readable.
+`audit_selection` replays fixed thresholds, fold separation, CV statistics and the
+same greedy/retry decisions without training again. Recorder events include
+`cv_fold_started`/`cv_fold_completed` with trial/fold numbers for live monitoring.
+
+This baseline-anchored mean-minus-SE gate is a **selection heuristic**. It is not
+Probatus's best-path parsimonious subset rule, a confidence interval, a formal
+non-inferiority test or an absolute deployment-quality guarantee. Correlated CV
+fits limit the interpretation of the fold-based SE; a variable reference yields
+more permissive floors. The adaptive search and repeated use of CV still require
+independent outer evaluation of the complete selection procedure. Keep Test and
+external datasets outside calibration, acceptance and model/seed tuning.
