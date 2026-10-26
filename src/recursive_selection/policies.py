@@ -132,3 +132,46 @@ class CVReferenceQualityPolicy:
 
     def to_config(self):
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class F1ReferenceQualityPolicy:
+    """Accept when Validation macro F1 matches the original full-model reference.
+
+    The reference stays fixed throughout selection. Precision and recall remain
+    diagnostics. Reusing Validation for search does not guarantee Test quality.
+    """
+
+    tolerance: float = 1e-12
+    gate_metrics = ("f1_macro",)
+
+    def __post_init__(self):
+        if (
+            isinstance(self.tolerance, bool)
+            or not isfinite(self.tolerance)
+            or self.tolerance < 0
+        ):
+            raise ValueError("tolerance must be finite and nonnegative.")
+
+    def thresholds(self, baseline):
+        self._validate(baseline)
+        return MacroScores(0.0, 0.0, baseline.f1_macro)
+
+    @staticmethod
+    def _validate(scores):
+        if not isinstance(scores, MacroScores) or not all(
+            isfinite(value) and 0 <= value <= 1 for value in scores.as_dict().values()
+        ):
+            raise ValueError(
+                "Quality scores and thresholds must be finite and between 0 and 1."
+            )
+
+    def evaluate(self, scores, thresholds):
+        self._validate(scores)
+        self._validate(thresholds)
+        margin = scores.f1_macro - thresholds.f1_macro
+        failed = ("f1_macro",) if margin < -self.tolerance else ()
+        return QualityDecision(not failed, margin, failed)
+
+    def to_config(self):
+        return asdict(self)

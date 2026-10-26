@@ -101,13 +101,14 @@ def plot_accepted_scores(
             color=color,
             label=label,
         )
-        ax.axhline(
-            100 * minimum,
-            color=color,
-            linestyle="--",
-            alpha=0.45,
-            label=f"{label} minimum: {minimum:.2%}",
-        )
+        if key in result.gate_metrics:
+            ax.axhline(
+                100 * minimum,
+                color=color,
+                linestyle="--",
+                alpha=0.45,
+                label=f"{label} minimum: {minimum:.2%}",
+            )
     ax.set_xticks(counts)
     ax.invert_xaxis()
     ax.set_ylim(0, 100)

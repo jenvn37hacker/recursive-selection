@@ -7,7 +7,7 @@ from time import perf_counter
 import numpy as np
 
 from .groups import FeatureGroups, labels, numeric_matrix
-from .acceleration import SelectionSpeedOptions, RemovalPlanner
+from .acceleration import SelectionSpeedOptions, BatchRemovalOptions, RemovalPlanner
 from .importance import MeanAbsoluteShapRanker
 from .policies import MacroQualityPolicy, CVReferenceQualityPolicy
 from .cross_validation import make_folds, evaluate_folds
@@ -52,9 +52,11 @@ class _RecursiveSelectorBase:
         )
         self.min_groups = int(min_groups)
         if speed_options is not None and not isinstance(
-            speed_options, SelectionSpeedOptions
+            speed_options, (SelectionSpeedOptions, BatchRemovalOptions)
         ):
-            raise TypeError("speed_options must be SelectionSpeedOptions or None.")
+            raise TypeError(
+                "speed_options must be SelectionSpeedOptions, BatchRemovalOptions or None."
+            )
         self.speed_options = speed_options
         self.recorder = recorder
         self._is_fitted = False
@@ -150,7 +152,12 @@ class _RecursiveSelectorBase:
         adapter = self.model_adapter
         cv_mode = isinstance(self.quality_policy, CVReferenceQualityPolicy)
         speed = self.speed_options
-        if speed is not None and not cv_mode:
+        cv_first = cv_mode and speed is not None
+        if isinstance(speed, BatchRemovalOptions) and cv_mode:
+            raise ValueError(
+                "BatchRemovalOptions requires a Validation quality policy."
+            )
+        if isinstance(speed, SelectionSpeedOptions) and not cv_mode:
             raise ValueError("SelectionSpeedOptions requires CVReferenceQualityPolicy.")
         if cv_groups is not None and not cv_mode:
             raise ValueError("cv_groups requires CVReferenceQualityPolicy.")
@@ -166,6 +173,7 @@ class _RecursiveSelectorBase:
             "validation_prediction_seconds": 0.0,
             "shap_update_seconds": 0.0,
             "trial_model_fit_count": 0,
+            "cv_fit_count": 0,
         }
         self._emit("run_started", group_ids=groups.group_ids)
         if full_model is None:
@@ -238,7 +246,7 @@ class _RecursiveSelectorBase:
         )
         loop_started = perf_counter()
         configuration_id = 0
-        if speed:
+        if cv_first:
             jobs, threads = speed.resources(len(cv_folds), adapter)
             timings.update(
                 cv_workers=jobs, cv_threads_per_worker=threads, cv_pruned_trials=0
@@ -290,7 +298,7 @@ class _RecursiveSelectorBase:
             )
             trial_model, validation_scores = None, None
             train_seconds = predict_seconds = 0.0
-            if speed is None:
+            if not cv_first:
                 trial_model, validation_scores, train_seconds, predict_seconds = (
                     fit_candidate(X_candidate, X_val_candidate)
                 )
@@ -321,7 +329,7 @@ class _RecursiveSelectorBase:
                     scores = cv_trial.mean
                 cv_trials.append(cv_trial)
             decision = self.quality_policy.evaluate(scores, floors)
-            if speed is not None and decision.passed:
+            if cv_first and decision.passed:
                 trial_model, validation_scores, train_seconds, predict_seconds = (
                     fit_candidate(X_candidate, X_val_candidate)
                 )
@@ -423,6 +431,7 @@ class _RecursiveSelectorBase:
             stop_reason,
             cv_trace,
             speed,
+            getattr(self.quality_policy, "gate_metrics", tuple(baseline.as_dict())),
         )
         self._emit(
             "run_finished",

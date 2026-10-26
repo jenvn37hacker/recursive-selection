@@ -95,6 +95,7 @@ class SelectionResult:
     stop_reason: str
     cv_evaluation: "CVEvaluationTrace | None" = None
     speed_options: Any = None
+    gate_metrics: tuple[str, ...] = ("precision_macro", "recall_macro", "f1_macro")
 
 
 @dataclass(frozen=True)

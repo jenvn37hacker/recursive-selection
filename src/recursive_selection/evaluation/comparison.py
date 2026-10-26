@@ -72,19 +72,26 @@ class EvaluationComparison:
                 "Evaluation reference does not match the fixed selection baseline."
             )
         rows = []
-        for key, label in METRIC_NAMES.items():
+        for key in getattr(policy, "gate_metrics", tuple(METRIC_NAMES)):
+            label = METRIC_NAMES[key]
             full, selected = (
                 getattr(baseline, key),
                 self.candidate[split].metrics[label],
             )
-            absolute = getattr(policy, "min_" + key)
+            extra = (
+                {
+                    "Absolute minimum": getattr(policy, "min_" + key),
+                    "Full minus allowed drop": full - policy.max_drop_from_full,
+                }
+                if hasattr(policy, "max_drop_from_full")
+                else {}
+            )
             rows.append(
                 {
                     "Metric": label,
                     "Full": full,
                     "Selected": selected,
-                    "Absolute minimum": absolute,
-                    "Full minus allowed drop": full - policy.max_drop_from_full,
+                    **extra,
                     "Minimum": getattr(floors, key),
                     "Change from full (pp)": 100 * (selected - full),
                     "Passed": selected >= getattr(floors, key) - policy.tolerance,

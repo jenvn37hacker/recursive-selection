@@ -857,3 +857,52 @@ can overlap; total library fit time is elapsed wall time. Native bundles use
 format 5 and restore speed settings, bounds, batches and fold evidence. Formats
 1–4 remain readable. Audits replay batch backoff, singleton retry, upper-bound
 certificates and the final singleton stopping condition without fitting models.
+
+## Fixed Validation F1 reference and batch removal
+
+`F1ReferenceQualityPolicy` accepts a candidate when its Validation macro F1 is at
+least the original full-feature model's Validation macro F1 (within numerical
+`tolerance=1e-12`). The reference stays fixed even if an intermediate subset
+scores higher. Precision and Recall are recorded as diagnostics, not constraints.
+
+```python
+from recursive_selection import (
+    RecursiveFeatureSelector, CatBoostAdapter,
+    F1ReferenceQualityPolicy, BatchRemovalOptions,
+)
+
+selector = RecursiveFeatureSelector(
+    model_adapter=CatBoostAdapter(
+        params={"iterations": 1000, "depth": 5, "random_seed": 42,
+                "thread_count": -1, "verbose": False},
+        fit_params={"early_stopping_rounds": 5, "use_best_model": True},
+    ),
+    quality_policy=F1ReferenceQualityPolicy(),
+    speed_options=BatchRemovalOptions(removal_fraction=0.1),
+    min_features=1,
+)
+selector.fit(X_train, y_train, eval_set=(X_val, y_val))
+```
+
+Each trial fits one fresh model on the entire Train set, predicts Validation,
+and applies the fixed F1 gate. This mode trains no CV models. An optional
+`full_model` is reused under the existing same-data/parameters/protocol contract.
+Test must stay outside selection. Repeated Validation use can overfit that set;
+this policy does not solve validation adaptation or guarantee Test performance.
+
+Batch removal starts with `ceil(current_count * removal_fraction)` lowest-SHAP
+units, capped by eligible units and the minimum retained count. Ties use larger
+original IDs first. Failed batches are halved (floor, at least one), without
+marking members individually failed. A rejected singleton is skipped until the
+next accepted removal. Acceptance keeps that model, recalculates exact SHAP on
+Train and resets retry eligibility and batch size. Rejections do not recalculate
+SHAP. Search stops at the requested minimum or after all current singleton
+removals fail. Batches change the search path and do not remove the quadratic
+worst case. Use fraction zero or omit speed options for singleton search.
+
+`BatchRemovalOptions` supports Validation policies; the existing
+`SelectionSpeedOptions` remains specific to the CV gate. Native metadata format 6
+persists the F1 policy, batch settings and active `gate_metrics`. Older formats
+remain readable. `SelectionReport.gate_constraints` reports only active
+constraints; all three macro metrics remain in trial histories. Score plots draw
+only active threshold lines, and `audit_selection` replays the gate and scheduling.

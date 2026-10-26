@@ -66,6 +66,11 @@ def audit_selection(
     )
     from ..policies import CVReferenceQualityPolicy
 
+    require(
+        result.gate_metrics
+        == getattr(quality_policy, "gate_metrics", tuple(METRIC_NAMES)),
+        "gate metrics differ from the quality policy",
+    )
     cv_mode = isinstance(quality_policy, CVReferenceQualityPolicy)
     if cv_mode:
         from ..cross_validation import validate_cv_trace

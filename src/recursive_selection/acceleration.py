@@ -60,6 +60,27 @@ class SelectionSpeedOptions:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class BatchRemovalOptions:
+    """Batch/backoff search with one full-Train model per Validation trial.
+
+    Zero uses singleton removals. Batches can change the resulting search path.
+    """
+
+    removal_fraction: float = 0.1
+
+    def __post_init__(self):
+        if (
+            isinstance(self.removal_fraction, bool)
+            or not isfinite(self.removal_fraction)
+            or not 0 <= self.removal_fraction <= 1
+        ):
+            raise ValueError("removal_fraction must be between 0 and 1.")
+
+    def to_config(self):
+        return asdict(self)
+
+
 class RemovalPlanner:
     """Ascending SHAP; failed batches shrink, failed singletons become ineligible."""
 

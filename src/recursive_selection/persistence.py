@@ -10,9 +10,13 @@ import platform
 import numpy as np
 
 from .backends import adapter_from_specification
-from .acceleration import SelectionSpeedOptions
+from .acceleration import SelectionSpeedOptions, BatchRemovalOptions
 from .importance import MeanAbsoluteShapRanker
-from .policies import MacroQualityPolicy, CVReferenceQualityPolicy
+from .policies import (
+    MacroQualityPolicy,
+    CVReferenceQualityPolicy,
+    F1ReferenceQualityPolicy,
+)
 from .results import (
     AcceptedState,
     MacroScores,
@@ -71,7 +75,7 @@ def save_selector(selector, directory):
 
     if (
         type(selector.quality_policy)
-        not in (MacroQualityPolicy, CVReferenceQualityPolicy)
+        not in (MacroQualityPolicy, CVReferenceQualityPolicy, F1ReferenceQualityPolicy)
         or type(selector.ranker) is not MeanAbsoluteShapRanker
     ):
         raise ValueError(
@@ -91,9 +95,14 @@ def save_selector(selector, directory):
         )
     metadata = {
         "format_version": (
-            5
-            if selector.speed_options
-            else (4 if selector.cv_evaluation_ is not None else 3)
+            6
+            if isinstance(selector.quality_policy, F1ReferenceQualityPolicy)
+            or isinstance(selector.speed_options, BatchRemovalOptions)
+            else (
+                5
+                if selector.speed_options
+                else (4 if selector.cv_evaluation_ is not None else 3)
+            )
         ),
         "package_version": __version__,
         "python_version": platform.python_version(),
@@ -102,6 +111,15 @@ def save_selector(selector, directory):
         "policy": selector.quality_policy.to_config(),
         "speed_options": (
             selector.speed_options.to_config() if selector.speed_options else None
+        ),
+        "speed_options_type": (
+            "batch" if isinstance(selector.speed_options, BatchRemovalOptions) else "cv"
+        ),
+        "gate_metrics": selector.result_.gate_metrics,
+        "policy_type": (
+            "f1_reference"
+            if isinstance(selector.quality_policy, F1ReferenceQualityPolicy)
+            else "macro"
         ),
         "min_groups": selector.min_groups,
         "classes": selector.classes_.tolist(),
@@ -151,7 +169,7 @@ def load_selector(directory):
         json.loads((directory / "selection.json").read_text(encoding="utf-8"))
     )
     data = _migrate_metadata(data)
-    if data["format_version"] not in (2, 3, 4, 5):
+    if data["format_version"] not in (2, 3, 4, 5, 6):
         raise ValueError("Unsupported selection metadata version.")
     mode = (
         data.get("selection_mode", "group")
@@ -228,22 +246,31 @@ def load_selector(directory):
     ):
         raise ValueError("Saved feature names do not match the selected column schema.")
     policy_name = data.get("policy_type", "macro")
-    if data["format_version"] >= 4 and policy_name != "cv_reference":
+    if data["format_version"] in (4, 5) and policy_name != "cv_reference":
         raise ValueError("CV formats require CV policy metadata.")
-    if policy_name not in {"macro", "cv_reference"}:
+    if policy_name not in {"macro", "cv_reference", "f1_reference"}:
         raise ValueError("Unknown saved quality policy.")
-    policy = (
-        CVReferenceQualityPolicy(**data["policy"])
-        if policy_name == "cv_reference"
-        else MacroQualityPolicy(**data["policy"])
-    )
+    policy = {
+        "macro": MacroQualityPolicy,
+        "cv_reference": CVReferenceQualityPolicy,
+        "f1_reference": F1ReferenceQualityPolicy,
+    }[policy_name](**data["policy"])
     cv_trace = (
         _restore_cv_trace(data["cv_evaluation"])
         if policy_name == "cv_reference"
         else None
     )
+    speed_type = data.get("speed_options_type", "cv")
+    if speed_type not in {"batch", "cv"}:
+        raise ValueError("Unknown saved speed options type.")
+    if data.get("speed_options") is not None and (
+        (speed_type == "cv") != (policy_name == "cv_reference")
+    ):
+        raise ValueError("Saved speed options do not match the quality policy.")
     speed = (
-        SelectionSpeedOptions(**data["speed_options"])
+        (BatchRemovalOptions if speed_type == "batch" else SelectionSpeedOptions)(
+            **data["speed_options"]
+        )
         if data.get("speed_options") is not None
         else None
     )
@@ -264,6 +291,9 @@ def load_selector(directory):
         data["stop_reason"],
         cv_trace,
         speed,
+        tuple(
+            data.get("gate_metrics", ("precision_macro", "recall_macro", "f1_macro"))
+        ),
     )
     if cv_trace is not None:
         from .cross_validation import validate_cv_trace
@@ -290,6 +320,15 @@ def load_selector(directory):
     selector.attempted_group_ids_ = tuple(data["attempted_group_ids"])
     selector.rejected_group_ids_ = tuple(data["rejected_group_ids"])
     selector._set_result(result)
+    if data["format_version"] == 6:
+        from .evaluation import audit_selection
+
+        audit_selection(
+            result,
+            feature_groups=groups.as_dict(),
+            quality_policy=policy,
+            min_groups=selector.min_groups,
+        )
     return selector
 
 

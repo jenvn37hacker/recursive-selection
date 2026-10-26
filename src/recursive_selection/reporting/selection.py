@@ -220,6 +220,7 @@ class SelectionReport:
         required_columns = {
             "Required " + name: getattr(result.effective_floors, key)
             for key, name in METRIC_NAMES.items()
+            if key in result.gate_metrics
         }
         self.retry_evidence = self.retry_evidence.assign(**required_columns)
         self.group_summary = pd.DataFrame(
@@ -416,6 +417,24 @@ class SelectionReport:
                 ignore_index=True,
             )
 
+        self.gate_constraints = (
+            self.cv_constraints.copy()
+            if result.cv_evaluation is not None
+            else pd.DataFrame(
+                [
+                    {
+                        "Metric": METRIC_NAMES[key],
+                        "Full validation": getattr(result.baseline_metrics, key),
+                        "Minimum": getattr(result.effective_floors, key),
+                        "Selected validation": getattr(result.final_metrics, key),
+                        "Margin": getattr(result.final_metrics, key)
+                        - getattr(result.effective_floors, key),
+                    }
+                    for key in result.gate_metrics
+                ]
+            )
+        )
+
     def style(self, name):
         table = getattr(self, name)
         formats = {
@@ -445,10 +464,15 @@ class SelectionReport:
             "trial_candidates_evaluated": len(r.history),
             "speed_options": r.speed_options.to_config() if r.speed_options else None,
             "retry_evidence_scope": "Singleton rejections and later singleton acceptance; failed batches do not imply singleton failure",
-            "timing_scope": "CV training/prediction times sum fold durations, including concurrent fits; library fit is elapsed wall time",
+            "timing_scope": (
+                "CV training/prediction times sum fold durations, including concurrent fits; library fit is elapsed wall time"
+                if r.cv_evaluation is not None
+                else "One full-Train fit and Validation prediction per trial; library fit is elapsed wall time"
+            ),
             "shap_calls": len(r.shap_history),
             "library_stop_reason": r.stop_reason,
             "library_timings_seconds": dict(r.timings),
+            "gate_metrics": list(r.gate_metrics),
             "baseline_metrics": asdict(r.baseline_metrics),
             "effective_floors": asdict(r.effective_floors),
             "final_metrics": asdict(r.final_metrics),
@@ -475,6 +499,7 @@ class SelectionReport:
         safe_name(prefix)
         u = self.unit_name
         tables = {
+            f"{prefix}_gate_constraints.csv": self.gate_constraints,
             f"{prefix}_initial_{u}_ranking.csv": self.initial_ranking,
             f"{prefix}_final_{u}_ranking.csv": self.final_ranking,
             f"{prefix}_selection_history.csv": self.trials,
