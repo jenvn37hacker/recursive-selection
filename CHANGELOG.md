@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.1.0 (2026-10-26)
+
+### Features
+
+- Add fixed Train CV reference quality gate
+  ([`c2827ba`](https://github.com/jenvn37hacker/recursive-selection/commit/c2827baf5f2a57511aec90e634e91c96a6f11165))
+
+
 ## v1.0.0 (2026-10-23)
 
 ### Continuous Integration
