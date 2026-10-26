@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.2.0 (2026-10-26)
+
+### Features
+
+- Accelerate CV selection with pruning and batch retries
+  ([`04fd649`](https://github.com/jenvn37hacker/recursive-selection/commit/04fd64958a0456f317fe4297c90644afaf127ef5))
+
+
 ## v1.1.0 (2026-10-26)
 
 ### Features

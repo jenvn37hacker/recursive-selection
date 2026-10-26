@@ -6,7 +6,7 @@ from .importance import MeanAbsoluteShapRanker
 from .policies import MacroQualityPolicy, CVReferenceQualityPolicy
 from .selector import RecursiveFeatureSelector, RecursiveGroupSelector
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __all__ = [
     "RecursiveGroupSelector",
     "RecursiveFeatureSelector",
