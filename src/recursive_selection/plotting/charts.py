@@ -128,6 +128,11 @@ def plot_accepted_scores(
         )
     )
     ax.set_xlabel(f"Number of retained {unit_name}s")
+    if not result.gate:
+        if title is None:
+            ax.set_title(ax.get_title().replace('Accepted', 'Visited'))
+        ax.scatter([len(result.selected_group_ids)], [100 * result.final_metrics.f1_macro],
+                   marker='*', s=130, color='#111827', zorder=5, label='Selected subset (best F1)')
     ax.set_ylabel("Score (%)")
     ax.grid(alpha=0.2)
     ax.set_axisbelow(True)

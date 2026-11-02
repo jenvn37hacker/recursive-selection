@@ -19,7 +19,7 @@ from .cross_validation import summarize_scores
 from .groups import FeatureGroups, labels, numeric_matrix
 from .policies import CVF1ReferenceQualityPolicy
 from .results import (AcceptedState, CVScoreSummary, FixedCVEvaluationTrace,
-                      MacroScores, SelectionResult, ShapSnapshot, TrialRecord,
+                      MacroScores, SelectionResult, ShapSnapshot, TrialRecord, QualityDecision, validate_search_options,
                       ValidationFold)
 
 
@@ -153,6 +153,7 @@ def evaluate_external_folds(selector, X, y, folds, classes, trial_id=0, forbidde
 def fit_fixed_cv(selector, X_dev, y_dev, *, cv_splits, cv_groups=None,
                  feature_groups=None, feature_names=None, fold_kind='partition'):
     selector._is_fitted = False
+    selector._start_search()
     started = perf_counter()
     if not isinstance(selector.quality_policy, CVF1ReferenceQualityPolicy):
         raise ValueError('fit_cv() requires CVF1ReferenceQualityPolicy.')
@@ -191,7 +192,7 @@ def fit_fixed_cv(selector, X_dev, y_dev, *, cv_splits, cv_groups=None,
     baseline, full_rounds = evaluate_external_folds(selector, X, y, folds, classes)
     timings.update(cv_fit_count=len(folds), cv_baseline_training_seconds=baseline.training_seconds,
                    cv_baseline_prediction_seconds=baseline.prediction_seconds)
-    floors = selector.quality_policy.thresholds(baseline)
+    floors = selector.quality_policy.thresholds(baseline) if selector.gate else MacroScores(0., 0., 0.)
     current_floors = floors
     if selector.speed_options:
         jobs, threads = selector.speed_options.resources(len(folds), adapter)
@@ -215,10 +216,11 @@ def fit_fixed_cv(selector, X_dev, y_dev, *, cv_splits, cv_groups=None,
     refit_budgets = [budget]
     current_model, current_groups, current_summary = full_model, groups.group_ids, baseline
     planner = RemovalPlanner(selector.min_groups,
-                             selector.speed_options.removal_fraction if selector.speed_options else 0.)
+                             selector.speed_options.removal_fraction if selector.speed_options else 0.,
+                             retry=selector.retry)
     tick = perf_counter()
     ranking = selector._rank(adapter, current_model, X, y, groups, current_groups)
-    timings['initial_shap_seconds'] = perf_counter()-tick
+    selector._ranking_time(timings, tick, initial=True)
     initial_ranking = dict(ranking)
     accepted = [AcceptedState(0, 0, current_groups, baseline.mean)]
     snapshots = [ShapSnapshot(0, 0, current_groups, tuple(ranking.items()))]
@@ -226,6 +228,7 @@ def fit_fixed_cv(selector, X_dev, y_dev, *, cv_splits, cv_groups=None,
     selector._emit('initialized', baseline=baseline.mean.as_dict(), floors=floors.as_dict(),
                    ranking=ranking, score_source='validation_cv')
     loop_started, configuration = perf_counter(), 0
+    selected = (current_model, current_groups, current_summary, 0)
     while True:
         if len(current_groups) <= selector.min_groups:
             stop_reason = 'min_groups_reached'
@@ -247,8 +250,8 @@ def fit_fixed_cv(selector, X_dev, y_dev, *, cv_splits, cv_groups=None,
         timings['cv_fit_count'] += len(folds)
         timings['cv_trial_training_seconds'] += summary.training_seconds
         timings['cv_trial_prediction_seconds'] += summary.prediction_seconds
-        before_f1 = current_floors.f1_macro
-        decision = selector.quality_policy.evaluate(summary.mean, current_floors)
+        before_f1 = current_floors.f1_macro if selector.gate else None
+        decision = selector._decision(summary.mean, current_floors)
         model, refit_seconds = None, 0.
         if decision.passed:
             model, budget, refit_seconds = refit(matrix, rounds, (full_model, current_model))
@@ -256,7 +259,8 @@ def fit_fixed_cv(selector, X_dev, y_dev, *, cv_splits, cv_groups=None,
             timings['trial_training_seconds'] += refit_seconds
             timings['trial_model_fit_count'] += 1
             timings['refit_fit_count'] += 1
-            current_floors = selector.quality_policy.advance(current_floors, summary.mean)
+            if selector.gate:
+                current_floors = selector.quality_policy.advance(current_floors, summary.mean)
         change = MacroScores(*(getattr(summary.mean, key)-getattr(baseline.mean, key)
                                for key in baseline.mean.as_dict()))
         trial = TrialRecord(trial_id, configuration, removed[0], current_groups, proposed,
@@ -264,7 +268,7 @@ def fit_fixed_cv(selector, X_dev, y_dev, *, cv_splits, cv_groups=None,
                             change, decision.passed, decision.worst_margin, decision.failed_metrics,
                             summary.training_seconds+refit_seconds, summary.prediction_seconds,
                             removed if selector.speed_options else (), 'mean',
-                            before_f1, current_floors.f1_macro)
+                            before_f1, current_floors.f1_macro if selector.gate else None)
         history.append(trial)
         attempted.update(removed)
         selector._emit('trial_completed', **trial.as_dict())
@@ -276,12 +280,15 @@ def fit_fixed_cv(selector, X_dev, y_dev, *, cv_splits, cv_groups=None,
         accepted.append(AcceptedState(configuration, trial_id, current_groups, summary.mean))
         tick = perf_counter()
         ranking = selector._rank(adapter, current_model, matrix, y, groups, current_groups)
-        timings['shap_update_seconds'] += perf_counter()-tick
+        selector._ranking_time(timings, tick)
         snapshots.append(ShapSnapshot(configuration, trial_id, current_groups, tuple(ranking.items())))
         selector._emit('configuration_accepted', configuration_id=configuration, trial_id=trial_id,
                        group_ids=current_groups, ranking=ranking, f1_reference=current_floors.f1_macro)
+        if selector.gate or summary.mean.f1_macro > selected[2].mean.f1_macro:
+            selected = (current_model, current_groups, current_summary, trial_id)
     timings['elimination_loop_seconds'] = perf_counter()-loop_started
     timings['total_fit_seconds'] = perf_counter()-started
+    current_model, current_groups, current_summary, selected_trial = selected
     columns = groups.columns(current_groups)
     trace = FixedCVEvaluationTrace(folds, cv_groups is not None, baseline, tuple(summaries),
         current_summary, tuple(best_rounds), tuple(refit_budgets), tuple(y.tolist()),
@@ -292,20 +299,24 @@ def fit_fixed_cv(selector, X_dev, y_dev, *, cv_splits, cv_groups=None,
         tuple(names[column] for column in columns) if names is not None else None,
         baseline.mean, floors, current_summary.mean, tuple(history), tuple(accepted),
         tuple(snapshots), dict(timings), stop_reason, trace, selector.speed_options,
-        selector.quality_policy.gate_metrics)
+        selector.quality_policy.gate_metrics if selector.gate else (),
+        **selector._options(selected_trial))
     selector.adapter_, selector.full_model_, selector.classes_ = adapter, full_model, classes.copy()
     selector.n_features_in_, selector.feature_names_in_, selector.feature_groups_ = X.shape[1], names, groups
     selector.initial_ranking_, selector.final_ranking_ = initial_ranking, dict(ranking)
     selector.attempted_group_ids_ = tuple(sorted(attempted))
     selector.rejected_group_ids_ = tuple(sorted(planner.failed))
     selector._emit('run_finished', group_ids=current_groups, stop_reason=stop_reason,
-                   trial_count=len(history), shap_calls=len(snapshots))
+                   trial_count=len(history), shap_calls=len(snapshots) if selector.shap else 0,
+                   ranking_calls=len(snapshots), selected_trial_id=selected_trial,
+                   terminal_group_ids=accepted[-1].group_ids)
     selector._set_result(result)
     return selector
 
 
 def validate_fixed_cv_trace(result, policy):
     """Replay all-fold means, fixed thresholds, refit budgets and fit counts."""
+    validate_search_options(result.retry, result.shap, result.gate, result.random_state)
     trace = result.cv_evaluation
     if not isinstance(policy, CVF1ReferenceQualityPolicy) or not isinstance(trace, FixedCVEvaluationTrace):
         raise ValueError('External Validation CV requires its own policy and trace.')
@@ -344,31 +355,40 @@ def validate_fixed_cv_trace(result, policy):
                (summary.training_seconds, summary.prediction_seconds)):
             raise ValueError('Invalid CV timing.')
     if not same(result.baseline_metrics, trace.baseline.mean) or not same(
-            result.effective_floors, policy.thresholds(trace.baseline)):
+            result.effective_floors, policy.thresholds(trace.baseline) if result.gate else MacroScores(0., 0., 0.)):
         raise ValueError('CV reference or initial Full F1 threshold differs.')
     selected, budgets = trace.baseline, [median_rounds(trace.best_rounds[0])]
-    floors = policy.thresholds(trace.baseline)
+    selected_trial = 0
+    floors = policy.thresholds(trace.baseline) if result.gate else MacroScores(0., 0., 0.)
+    if not result.gate and result.gate_metrics:
+        raise ValueError('Disabled gate must not expose active gate metrics.')
     for trial, summary, rounds in zip(result.history, trace.trials, trace.best_rounds[1:]):
         if not same(trial.metrics, summary.mean) or trial.metric_kind != 'mean':
             raise ValueError('Trial metrics must be the complete fold mean.')
-        decision = policy.evaluate(summary.mean, floors)
+        decision = policy.evaluate(summary.mean, floors) if result.gate else QualityDecision(True, 0., ())
         if (trial.accepted != decision.passed or trial.failed_metrics != decision.failed_metrics
                 or not np.isclose(trial.worst_margin, decision.worst_margin, rtol=0, atol=1e-12)):
             raise ValueError('Trial decision differs from the running F1 reference.')
         before = floors.f1_macro
-        if trial.accepted:
+        if trial.accepted and result.gate:
             floors = policy.advance(floors, summary.mean)
-        if trial.f1_reference_before is None or trial.f1_reference_after is None:
+        if not result.gate:
+            if trial.f1_reference_before is not None or trial.f1_reference_after is not None:
+                raise ValueError('Disabled gate must not record an active F1 reference.')
+        elif trial.f1_reference_before is None or trial.f1_reference_after is None:
             if policy.reference != 'full':
                 raise ValueError('Missing best-so-far F1 reference evidence.')
         elif not np.allclose([trial.f1_reference_before, trial.f1_reference_after],
                              [before, floors.f1_macro], rtol=0, atol=1e-12):
             raise ValueError('Recorded F1 reference transition differs.')
         if trial.accepted:
-            selected = summary
             budgets.append(median_rounds(rounds))
+            if result.gate or summary.mean.f1_macro > selected.mean.f1_macro:
+                selected, selected_trial = summary, trial.trial_id
+    if result.selected_state.trial_id != selected_trial:
+        raise ValueError('Selected trial differs from the configured last/best F1 rule.')
     if selected != trace.final or not same(result.final_metrics, trace.final.mean):
-        raise ValueError('Final CV summary differs from the last accepted trial.')
+        raise ValueError('Final CV summary differs from the selected trial.')
     if tuple(budgets) != trace.refit_rounds:
         raise ValueError('Refit budget differs from ceiling median of fold best rounds.')
     expected_fits = len(trace.folds)*(1+len(result.history))

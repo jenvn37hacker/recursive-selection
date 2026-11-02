@@ -5,6 +5,17 @@ from typing import Any
 
 import numpy as np
 from sklearn.metrics import precision_recall_fscore_support
+from numbers import Integral
+
+
+def validate_search_options(retry, shap, gate, random_state):
+    for name, value in [('retry', retry), ('shap', shap), ('gate', gate)]:
+        if not isinstance(value, bool):
+            raise TypeError(f'{name} must be a bool.')
+    if retry and not gate:
+        raise ValueError('retry=True requires gate=True.')
+    if isinstance(random_state, bool) or not isinstance(random_state, Integral) or random_state < 0:
+        raise ValueError('random_state must be a nonnegative integer.')
 
 
 @dataclass(frozen=True)
@@ -42,6 +53,7 @@ class QualityDecision:
 
 @dataclass(frozen=True)
 class TrialRecord:
+    """An evaluated removal. With gate=False, accepted means visited, not quality-pass."""
     trial_id: int
     configuration_id: int
     group_id: int
@@ -99,6 +111,34 @@ class SelectionResult:
     speed_options: Any = None
     gate_metrics: tuple[str, ...] = ("precision_macro", "recall_macro", "f1_macro")
     recording_split: Any = None
+    retry: bool = True
+    shap: bool = True
+    gate: bool = True
+    random_state: int = 42
+    selected_trial_id: int | None = None
+
+    @property
+    def selected_state(self):
+        if self.selected_trial_id is not None and (
+            isinstance(self.selected_trial_id, bool) or not isinstance(self.selected_trial_id, Integral)
+            or self.selected_trial_id < 0
+        ):
+            raise ValueError('Selected trial ID must be a nonnegative integer.')
+        if not self.gate and self.selected_trial_id is None:
+            raise ValueError('No-gate selection requires an explicit selected trial ID.')
+        trial = self.accepted_history[-1].trial_id if self.selected_trial_id is None else self.selected_trial_id
+        for state in self.accepted_history:
+            if state.trial_id == trial:
+                return state
+        raise ValueError('Selected trial does not identify a visited/accepted state.')
+
+    @property
+    def ranking_source(self):
+        return 'SHAP' if self.shap else 'Random ranking'
+
+    @property
+    def search_options(self):
+        return dict(retry=self.retry, shap=self.shap, gate=self.gate, random_state=self.random_state)
 
 
 @dataclass(frozen=True)
@@ -158,7 +198,8 @@ class FixedCVEvaluationTrace:
     """External two-part folds, complete CV scores, and accepted refit budgets.
 
     best_rounds[0] describes Full; subsequent entries correspond to every trial.
-    refit_rounds corresponds to accepted_history, including the initial Full.
+    refit_rounds corresponds to accepted_history (visited states if ungated), including Full.
+    final describes the selected state, which can precede the terminal state.
     """
 
     folds: tuple[ValidationFold, ...]

@@ -18,7 +18,7 @@ METRIC_NAMES = {
 }
 
 
-def ranking_table(importance, rejected_ids=(), *, unit_name="group", group_labels=None):
+def ranking_table(importance, rejected_ids=(), *, unit_name="group", group_labels=None, ranking_source="SHAP", retry=True):
     import pandas as pd
 
     safe_name(unit_name)
@@ -41,11 +41,11 @@ def ranking_table(importance, rejected_ids=(), *, unit_name="group", group_label
     total = float(table["importance"].sum())
     shares = table["importance"] / total if total > 0 else table["importance"] * 0.0
     additional = {
-        "SHAP share": shares,
-        "Cumulative SHAP": shares.cumsum(),
+        f"{ranking_source} share": shares,
+        f"Cumulative {ranking_source}": shares.cumsum(),
         "Group": np.where(
             table[f"{unit_name}_id"].isin(rejected_ids),
-            "Rejected in current configuration",
+            "Rejected in current configuration" if retry else "Rejected previously (retry disabled)",
             "Eligible",
         ),
     }
@@ -113,7 +113,7 @@ class SelectionReport:
                 "Features tried": len(self.groups.columns(trial.proposed_groups)),
                 "Train time (s)": trial.train_seconds,
                 "Validation prediction (s)": trial.validation_predict_seconds,
-                "Decision": "Accepted" if trial.accepted else "Rejected - try another",
+                "Decision": ("Visited (gate disabled)" if not result.gate else "Accepted" if trial.accepted else "Rejected - try another"),
                 "Failed metrics": ", ".join(
                     METRIC_NAMES.get(key, key) for key in trial.failed_metrics
                 )
@@ -141,7 +141,7 @@ class SelectionReport:
         failed = {
             t.group_id
             for t in result.history
-            if t.configuration_id == result.accepted_history[-1].configuration_id
+            if (not result.retry or t.configuration_id == result.accepted_history[-1].configuration_id)
             and not t.accepted
             and len(removed_ids(t)) == 1
         }
@@ -154,13 +154,13 @@ class SelectionReport:
         self.initial_ranking = ranking_table(
             dict(result.shap_history[0].importance),
             unit_name=unit_name,
-            group_labels=self.group_labels,
+            group_labels=self.group_labels, ranking_source=result.ranking_source, retry=result.retry,
         )
         self.final_ranking = ranking_table(
-            dict(result.shap_history[-1].importance),
+            dict(next(s.importance for s in result.shap_history if s.trial_id == result.selected_state.trial_id)),
             failed,
             unit_name=unit_name,
-            group_labels=self.group_labels,
+            group_labels=self.group_labels, ranking_source=result.ranking_source, retry=result.retry,
         )
         self.importance_history = pd.DataFrame(
             [
@@ -243,7 +243,7 @@ class SelectionReport:
                 {
                     "Stage": "Initial SHAP calculation",
                     "Calls": 1,
-                    "Time (s)": times["initial_shap_seconds"],
+                    "Time (s)": times["initial_shap_seconds"] if result.shap else times.get("initial_ranking_seconds", 0.),
                 },
                 {
                     "Stage": "Trial training",
@@ -258,7 +258,7 @@ class SelectionReport:
                 {
                     "Stage": "SHAP updates",
                     "Calls": len(result.shap_history) - 1,
-                    "Time (s)": times["shap_update_seconds"],
+                    "Time (s)": times["shap_update_seconds"] if result.shap else times.get("ranking_update_seconds", 0.),
                 },
                 {
                     "Stage": "Elimination loop (including recorder)",
@@ -268,7 +268,7 @@ class SelectionReport:
                 {
                     "Stage": "Initial SHAP + elimination loop",
                     "Calls": 1,
-                    "Time (s)": times["initial_shap_seconds"]
+                    "Time (s)": (times["initial_shap_seconds"] if result.shap else times.get("initial_ranking_seconds", 0.))
                     + times["elimination_loop_seconds"],
                 },
                 {
@@ -297,7 +297,7 @@ class SelectionReport:
                     "Property": "Trial models trained",
                     "Value": times.get("trial_model_fit_count", len(result.history)),
                 },
-                {"Property": "SHAP calls", "Value": len(result.shap_history)},
+                {"Property": "SHAP calls", "Value": len(result.shap_history) if result.shap else 0},
                 {
                     "Property": "Final rejected " + plural.lower(),
                     "Value": list(self.rejected_group_ids),
@@ -379,6 +379,9 @@ class SelectionReport:
                     for key, label in METRIC_NAMES.items() if key in result.gate_metrics
                 ]
             )
+            if not result.gate:
+                self.cv_constraints = pd.DataFrame(columns=['Metric', 'Full CV mean', 'Full CV SD',
+                    'Full CV SE', 'Minimum', 'Selected CV mean', 'Margin'])
             extra = [
                 {
                     "Stage": "CV baseline training",
@@ -486,6 +489,18 @@ class SelectionReport:
                     {'Stage': 'Full development refit', 'Calls': 1,
                      'Time (s)': times['full_training_seconds']}])], ignore_index=True)
 
+        if not result.shap:
+            self.selection_costs['Stage'] = self.selection_costs.Stage.str.replace('SHAP', 'Random ranking', regex=False)
+        if not result.gate:
+            if external_cv:
+                inactive = ['Truncation decimals','Full F1 gate','Trial F1 gate',
+                            'F1 reference before','F1 reference after','Margin (pp)']
+                for frame in [self.trials, self.cv_summary, self.f1_reference_history]:
+                    frame['Reference'] = 'disabled'
+                    for column in inactive:
+                        if column in frame: frame[column] = None
+                self.cv_summary['Selected'] = self.cv_summary.Trial.eq(result.selected_state.trial_id)
+                self.trials['Selected'] = self.trials.Step.eq(result.selected_state.trial_id)
         self.gate_constraints = (
             self.cv_constraints.copy()
             if result.cv_evaluation is not None
@@ -538,7 +553,11 @@ class SelectionReport:
                 if r.cv_evaluation is not None
                 else "One full-Train fit and Validation prediction per trial; library fit is elapsed wall time"
             ),
-            "shap_calls": len(r.shap_history),
+            "shap_calls": len(r.shap_history) if r.shap else 0,
+            "ranking_source": r.ranking_source, "search_options": r.search_options,
+            "selected_trial_id": r.selected_state.trial_id,
+            "terminal_trial_id": r.accepted_history[-1].trial_id,
+            "terminal_group_ids": list(r.accepted_history[-1].group_ids),
             "library_stop_reason": r.stop_reason,
             "library_timings_seconds": dict(r.timings),
             "gate_metrics": list(r.gate_metrics),
@@ -548,13 +567,14 @@ class SelectionReport:
             "effective_floors": asdict(r.effective_floors),
             "final_metrics": asdict(r.final_metrics),
             f"attempted_{unit}_ids": list(self.attempted_group_ids),
-            f"rejected_{unit}_ids_in_final_configuration": list(
+            f"rejected_{unit}_ids_" + ("in_final_configuration" if r.retry else "retry_disabled"): list(
                 self.rejected_group_ids
             ),
             "initial_shap_time_seconds": r.timings["initial_shap_seconds"],
             "elimination_loop_time_seconds": r.timings["elimination_loop_seconds"],
             "score_source": self.score_source,
             "scope": (
+                "Gate disabled; highest raw F1 along visited path; first tie; no Test guarantee" if not r.gate else
                 f'External-Validation-CV mean-F1-constrained greedy selection; {r.cv_evaluation.reference} reference; no test guarantee'
                 if isinstance(r.cv_evaluation, FixedCVEvaluationTrace) else
                 "Train-CV-constrained greedy selection; baseline mean minus SE is a heuristic, not a test guarantee"
@@ -573,6 +593,7 @@ class SelectionReport:
     def save(self, directory, *, prefix="selection", metadata=None, overwrite=False):
         safe_name(prefix)
         u = self.unit_name
+        evolution = 'shap' if self.result.shap else 'random_ranking'
         tables = {
             f"{prefix}_gate_constraints.csv": self.gate_constraints,
             f"{prefix}_initial_{u}_ranking.csv": self.initial_ranking,
@@ -581,8 +602,8 @@ class SelectionReport:
             f"{prefix}_accepted_history.csv": self.accepted_states,
             f"{prefix}_{u}_summary.csv": self.group_summary,
             f"{prefix}_selection_costs.csv": self.selection_costs,
-            f"{prefix}_{u}_shap_evolution.csv": self.importance_history,
-            f"{prefix}_{u}_shap_evolution_matrix.csv": self.importance_matrix,
+            f"{prefix}_{u}_{evolution}_evolution.csv": self.importance_history,
+            f"{prefix}_{u}_{evolution}_evolution_matrix.csv": self.importance_matrix,
             f"{prefix}_{u}_retry_evidence.csv": self.retry_evidence,
         }
         if self.result.cv_evaluation is not None:
@@ -614,5 +635,5 @@ class SelectionReport:
             },
             prefix=prefix + "_selection",
             overwrite=overwrite,
-            indexed=(f"{prefix}_{u}_shap_evolution_matrix.csv",),
+            indexed=(f"{prefix}_{u}_{evolution}_evolution_matrix.csv",),
         )

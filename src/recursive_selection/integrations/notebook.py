@@ -36,6 +36,8 @@ class NotebookSelectionRecorder:
 
     def record(self, event):
         if event["event"] == "initialized":
+            self._gate = event.get('gate_enabled', True)
+            self._ranking_source = event.get('ranking_source', 'SHAP')
             self._score_label = (
                 'Validation CV mean' if event.get('score_source') == 'validation_cv' else
                 "Train CV" if event.get("score_source") == "train_cv" else "Validation"
@@ -47,13 +49,13 @@ class NotebookSelectionRecorder:
             table = ranking_table(
                 event["ranking"],
                 unit_name=self.unit_name,
-                group_labels=self.group_labels,
+                group_labels=self.group_labels, ranking_source=self._ranking_source,
             )
             styled = table.style.format(
                 {
                     "importance": "{:.6f}",
-                    "SHAP share": "{:.2%}",
-                    "Cumulative SHAP": "{:.2%}",
+                    f"{self._ranking_source} share": "{:.2%}",
+                    f"Cumulative {self._ranking_source}": "{:.2%}",
                 }
             )
             if self.table_display is None:
@@ -66,7 +68,7 @@ class NotebookSelectionRecorder:
                 group_labels=self.group_labels,
                 total_groups=len(event["ranking"]),
                 unit_name=self.unit_name,
-                value_label="Mean |SHAP|",
+                value_label="Mean |SHAP|" if self._ranking_source == "SHAP" else "Random priority",
                 top_n=self.top_n,
             )
             if self.chart_display is None:
@@ -94,11 +96,12 @@ class NotebookSelectionRecorder:
                     f"{getattr(self, '_score_label', 'Validation')} {label}"
                     f"{' upper bound' if event.get('metric_kind') == 'cv_upper_bound' else ''}: {event['metrics'][key]:.2%}"
                 )
-            print(f"Worst gate margin (pp): {100 * event['worst_margin']:+.4f}")
+            if event.get('gate_enabled', True):
+                print(f"Worst gate margin (pp): {100 * event['worst_margin']:+.4f}")
             print(
                 "Decision:",
                 (
-                    "ACCEPTED"
+                    "VISITED (gate disabled)" if not event.get("gate_enabled", True) else "ACCEPTED"
                     if event["accepted"]
                     else f"REJECTED - TRY ANOTHER {self.unit_name.upper()}"
                 ),

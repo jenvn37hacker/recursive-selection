@@ -95,8 +95,9 @@ class BatchRemovalOptions:
 class RemovalPlanner:
     """Ascending SHAP; failed batches shrink, failed singletons become ineligible."""
 
-    def __init__(self, minimum, fraction=0.0):
+    def __init__(self, minimum, fraction=0.0, *, retry=True):
         self.minimum, self.fraction = minimum, fraction
+        self.retry = retry
         self.failed = set()
         self.batch_limit = None
 
@@ -114,7 +115,8 @@ class RemovalPlanner:
 
     def observe(self, removed, accepted):
         if accepted:
-            self.failed.clear()
+            if self.retry:
+                self.failed.clear()
             self.batch_limit = None
         elif len(removed) > 1:
             self.batch_limit = max(1, len(removed) // 2)

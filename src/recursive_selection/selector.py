@@ -19,11 +19,12 @@ from .results import (
     TrialRecord,
     CVEvaluationTrace,
     CVPrunedEvaluation,
+    QualityDecision, validate_search_options,
 )
 
 
 class _RecursiveSelectorBase:
-    """Coordinate refits and configuration-specific retries for selection units."""
+    """Coordinate recursive elimination with explicit retry, ranking and gate ablations."""
 
     _selection_mode = "group"
 
@@ -36,7 +37,16 @@ class _RecursiveSelectorBase:
         min_groups=1,
         recorder=None,
         speed_options=None,
+        retry=True,
+        shap=True,
+        gate=True,
+        random_state=42,
     ):
+        validate_search_options(retry, shap, gate, random_state)
+        if not shap and ranker is not None:
+            raise ValueError('shap=False uses seeded random ranking; omit ranker.')
+        self.retry, self.shap, self.gate = retry, shap, gate
+        self.random_state = int(random_state)
         if model_adapter is None:
             raise ValueError("model_adapter is required.")
         if (
@@ -63,9 +73,14 @@ class _RecursiveSelectorBase:
 
     def _emit(self, kind, **payload):
         if self.recorder is not None:
+            payload.setdefault('gate_enabled', self.gate)
+            payload.setdefault('retry_enabled', self.retry)
+            payload.setdefault('ranking_source', 'SHAP' if self.shap else 'Random ranking')
             self.recorder.record(deepcopy({"event": kind, **payload}))
 
     def _rank(self, adapter, model, X, y, feature_groups, group_ids):
+        if not self.shap:
+            return dict(zip(group_ids, map(float, self._ranking_rng.permutation(len(group_ids)))))
         scores = dict(
             self.ranker.rank(adapter, model, X, y, feature_groups.relative(group_ids))
         )
@@ -75,6 +90,24 @@ class _RecursiveSelectorBase:
         if any(not np.isfinite(value) or value < 0 for value in scores.values()):
             raise ValueError("Ranker must return finite nonnegative group importance.")
         return scores
+
+    def _start_search(self):
+        validate_search_options(self.retry, self.shap, self.gate, self.random_state)
+        self._ranking_rng = np.random.default_rng(self.random_state)
+
+    def _decision(self, scores, floors):
+        return self.quality_policy.evaluate(scores, floors) if self.gate else QualityDecision(True, 0., ())
+
+    def _ranking_time(self, timings, started, *, initial=False):
+        elapsed = perf_counter() - started
+        rank_key = 'initial_ranking_seconds' if initial else 'ranking_update_seconds'
+        shap_key = 'initial_shap_seconds' if initial else 'shap_update_seconds'
+        timings[rank_key] = timings.get(rank_key, 0.) + elapsed
+        timings[shap_key] += elapsed if self.shap else 0.
+
+    def _options(self, selected_trial_id):
+        return dict(retry=self.retry, shap=self.shap, gate=self.gate,
+                    random_state=self.random_state, selected_trial_id=selected_trial_id)
 
     @staticmethod
     def _check_model(adapter, model, n_features, expected_classes=None):
@@ -114,6 +147,7 @@ class _RecursiveSelectorBase:
         model parameters and training protocol. The caller owns its provenance.
         """
         self._is_fitted = False
+        self._start_search()
         if isinstance(self.quality_policy, CVF1ReferenceQualityPolicy):
             raise ValueError('CVF1ReferenceQualityPolicy requires fit_cv() with external folds.')
         started = perf_counter()
@@ -219,8 +253,8 @@ class _RecursiveSelectorBase:
                 cv_trial_prediction_seconds=0.0,
                 cv_fit_count=len(cv_folds),
             )
-        floors = self.quality_policy.thresholds(cv_baseline if cv_mode else baseline)
-        if not self.quality_policy.evaluate(baseline, floors).passed:
+        floors = self.quality_policy.thresholds(cv_baseline if cv_mode else baseline) if self.gate else MacroScores(0., 0., 0.)
+        if not self._decision(baseline, floors).passed:
             raise ValueError(
                 "Full model does not meet the fixed validation floors; selection did not start."
             )
@@ -228,13 +262,13 @@ class _RecursiveSelectorBase:
         current_groups = groups.group_ids
         current_scores = baseline
         planner = RemovalPlanner(
-            self.min_groups, speed.removal_fraction if speed else 0.0
+            self.min_groups, speed.removal_fraction if speed else 0.0, retry=self.retry
         )
         failed = planner.failed
         attempted = set()
         tick = perf_counter()
         ranking = self._rank(adapter, current_model, X, y, groups, current_groups)
-        timings["initial_shap_seconds"] = perf_counter() - tick
+        self._ranking_time(timings, tick, initial=True)
         initial_ranking = dict(ranking)
         history = []
         accepted = [AcceptedState(0, 0, current_groups, baseline)]
@@ -248,6 +282,7 @@ class _RecursiveSelectorBase:
         )
         loop_started = perf_counter()
         configuration_id = 0
+        selected = (current_model, current_groups, current_scores, cv_current, validation_final, 0)
         if cv_first:
             jobs, threads = speed.resources(len(cv_folds), adapter)
             timings.update(
@@ -318,7 +353,7 @@ class _RecursiveSelectorBase:
                     emit=self._emit,
                     trial_id=trial_id,
                     speed_options=speed,
-                    floors=floors,
+                    floors=floors if self.gate else None,
                     tolerance=self.quality_policy.tolerance,
                 )
                 timings["cv_trial_training_seconds"] += cv_trial.training_seconds
@@ -330,7 +365,7 @@ class _RecursiveSelectorBase:
                 else:
                     scores = cv_trial.mean
                 cv_trials.append(cv_trial)
-            decision = self.quality_policy.evaluate(scores, floors)
+            decision = self._decision(scores, floors)
             if cv_first and decision.passed:
                 trial_model, validation_scores, train_seconds, predict_seconds = (
                     fit_candidate(X_candidate, X_val_candidate)
@@ -372,7 +407,6 @@ class _RecursiveSelectorBase:
             validation_final = validation_scores
             if cv_mode:
                 cv_current = cv_trial
-            failed.clear()
             configuration_id += 1
             accepted.append(
                 AcceptedState(configuration_id, trial_id, current_groups, scores)
@@ -381,7 +415,7 @@ class _RecursiveSelectorBase:
             ranking = self._rank(
                 adapter, current_model, X_candidate, y, groups, current_groups
             )
-            timings["shap_update_seconds"] += perf_counter() - tick
+            self._ranking_time(timings, tick)
             snapshots.append(
                 ShapSnapshot(
                     configuration_id, trial_id, current_groups, tuple(ranking.items())
@@ -394,8 +428,11 @@ class _RecursiveSelectorBase:
                 group_ids=current_groups,
                 ranking=ranking,
             )
+            if self.gate or scores.f1_macro > selected[2].f1_macro:
+                selected = (current_model, current_groups, current_scores, cv_current, validation_final, trial_id)
         timings["elimination_loop_seconds"] = perf_counter() - loop_started
         timings["total_fit_seconds"] = perf_counter() - started
+        current_model, current_groups, current_scores, cv_current, validation_final, selected_trial = selected
         columns = groups.columns(current_groups)
         selected_names = tuple(names[c] for c in columns) if names is not None else None
         cv_trace = (
@@ -433,14 +470,17 @@ class _RecursiveSelectorBase:
             stop_reason,
             cv_trace,
             speed,
-            getattr(self.quality_policy, "gate_metrics", tuple(baseline.as_dict())),
+            getattr(self.quality_policy, "gate_metrics", tuple(baseline.as_dict())) if self.gate else (),
+            **self._options(selected_trial),
         )
         self._emit(
             "run_finished",
             group_ids=current_groups,
             stop_reason=stop_reason,
             trial_count=len(history),
-            shap_calls=len(snapshots),
+            shap_calls=len(snapshots) if self.shap else 0,
+            ranking_calls=len(snapshots), selected_trial_id=selected_trial,
+            terminal_group_ids=accepted[-1].group_ids,
         )
         self.adapter_ = adapter
         self.full_model_ = full_model
@@ -462,7 +502,16 @@ class _RecursiveSelectorBase:
         self.development_indices_ = self.split_.development_rows if self.split_ is not None else None
         self.cv_evaluation_ = result.cv_evaluation
         budgets = getattr(result.cv_evaluation, 'refit_rounds', ())
-        self.refit_rounds_ = budgets[-1] if budgets else None
+        selected_index = result.accepted_history.index(result.selected_state)
+        self.refit_rounds_ = budgets[selected_index] if budgets else None
+        self.selected_trial_id_ = result.selected_state.trial_id
+        self.last_trial_id_ = result.history[-1].trial_id if result.history else 0
+        self.terminal_group_ids_ = result.accepted_history[-1].group_ids
+        self.importance_history_ = result.shap_history
+        self.visited_history_ = result.accepted_history
+        self.selection_rule_ = 'last_accepted' if result.gate else 'best_raw_f1'
+        self.ranking_source_ = result.ranking_source
+        self.final_ranking_ = dict(next(s.importance for s in result.shap_history if s.trial_id == self.selected_trial_id_))
         self.estimator_ = result.estimator
         self.selected_group_ids_ = result.selected_group_ids
         self.selected_columns_ = result.selected_columns
@@ -492,7 +541,10 @@ class _RecursiveSelectorBase:
         Validation both monitors early stopping and supplies the fold score.
         Full and accepted candidates are refitted without Validation using the
         ceiling of median best boosting rounds. Test must never be supplied.
-        BatchRemovalOptions retains the existing batch/backoff/retry semantics.
+        retry=True requires gate=True. shap=False uses seeded random priorities.
+        gate=False visits every step and selects the highest raw mean F1 (first tie),
+        including Full. Gates/truncation do not affect this maximum.
+        BatchRemovalOptions controls batch size and bounded CV parallelism.
         """
         from .fixed_cv import fit_fixed_cv
 
@@ -645,6 +697,10 @@ class RecursiveFeatureSelector(_RecursiveSelectorBase):
         min_features=1,
         recorder=None,
         speed_options=None,
+        retry=True,
+        shap=True,
+        gate=True,
+        random_state=42,
     ):
         if (
             isinstance(min_features, bool)
@@ -659,6 +715,7 @@ class RecursiveFeatureSelector(_RecursiveSelectorBase):
             min_groups=min_features,
             recorder=recorder,
             speed_options=speed_options,
+            retry=retry, shap=shap, gate=gate, random_state=random_state,
         )
 
     @property

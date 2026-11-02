@@ -374,11 +374,12 @@ def validate_cv_trace(result, policy):
             raise ValueError("Invalid CV timing.")
     if not same(trace.baseline.mean, result.baseline_metrics):
         raise ValueError("CV reference mean differs from selection baseline.")
-    if not same(policy.thresholds(trace.baseline), result.effective_floors):
+    if not same(policy.thresholds(trace.baseline) if result.gate else MacroScores(0., 0., 0.), result.effective_floors):
         raise ValueError(
             "CV thresholds differ from the fixed full-reference mean minus SE."
         )
     selected = trace.baseline
+    selected_trial = 0
     validation_selected = trace.validation_baseline
     if len(trace.validation_trials) != len(result.history):
         raise ValueError(
@@ -408,15 +409,19 @@ def validate_cv_trace(result, policy):
                 raise ValueError(
                     "A rejected CV-first candidate must not have a deployment fit."
                 )
-        if trial.accepted:
-            selected, validation_selected = summary, validation
+        if not result.gate and (pruned or not trial.accepted):
+            raise ValueError('No-gate search must complete and visit every trial.')
+        if trial.accepted and (result.gate or summary.mean.f1_macro > selected.mean.f1_macro):
+            selected, validation_selected, selected_trial = summary, validation, trial.trial_id
+    if result.selected_state.trial_id != selected_trial:
+        raise ValueError('Selected trial differs from the last/best F1 rule.')
     if selected != trace.final or not same(result.final_metrics, trace.final.mean):
         raise ValueError(
-            "Final CV result differs from the last accepted configuration."
+            "Final CV result differs from the selected configuration."
         )
     if not same(validation_selected, trace.validation_final):
         raise ValueError(
-            "Final Validation diagnostics differ from the last accepted configuration."
+            "Final Validation diagnostics differ from the selected configuration."
         )
     if int(result.timings.get("cv_fit_count", -1)) != len(
         trace.baseline.fold_scores

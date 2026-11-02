@@ -5,6 +5,7 @@ from numbers import Integral
 import numpy as np
 
 from ..acceleration import RemovalPlanner, removed_ids
+from ..results import MacroScores, QualityDecision, validate_search_options
 from ..groups import FeatureGroups
 from ..reporting.export import save_reports
 from ..reporting.selection import METRIC_NAMES, SelectionReport
@@ -57,6 +58,8 @@ def audit_selection(
             list(a.as_dict().values()), list(b.as_dict().values()), atol=1e-12, rtol=0
         )
 
+    validate_search_options(result.retry, result.shap, result.gate, result.random_state)
+    rng = np.random.default_rng(result.random_state)
     groups = FeatureGroups(feature_groups, sum(len(c) for c in feature_groups.values()))
     require(
         not isinstance(min_groups, bool)
@@ -68,7 +71,7 @@ def audit_selection(
 
     require(
         result.gate_metrics
-        == getattr(quality_policy, "gate_metrics", tuple(METRIC_NAMES)),
+        == (getattr(quality_policy, "gate_metrics", tuple(METRIC_NAMES)) if result.gate else ()),
         "gate metrics differ from the quality policy",
     )
     external_cv = isinstance(quality_policy, CVF1ReferenceQualityPolicy)
@@ -84,11 +87,11 @@ def audit_selection(
         raise ValueError("CV results require CVReferenceQualityPolicy for audit.")
     reference = result.cv_evaluation.baseline if cv_mode else result.baseline_metrics
     require(
-        close(quality_policy.thresholds(reference), result.effective_floors),
+        close(quality_policy.thresholds(reference) if result.gate else MacroScores(0., 0., 0.), result.effective_floors),
         "initial thresholds differ from full-model initialization",
     )
     require(
-        quality_policy.evaluate(
+        not result.gate or quality_policy.evaluate(
             result.baseline_metrics, result.effective_floors
         ).passed,
         "initial full model is infeasible",
@@ -101,6 +104,7 @@ def audit_selection(
     planner = RemovalPlanner(
         min_groups,
         result.speed_options.removal_fraction if result.speed_options else 0.0,
+        retry=result.retry,
     )
     failed = planner.failed
     configuration, snapshot_index = 0, 0
@@ -133,8 +137,11 @@ def audit_selection(
             "importance must contain each retained group in input order",
         )
         require(all(np.isfinite(v) and v >= 0 for _, v in pairs), "invalid importance")
+        if not result.shap:
+            expected = dict(zip(current, map(float, rng.permutation(len(current)))))
+            require(dict(pairs) == expected, 'random ranking differs from recorded seed/schedule')
         require(
-            quality_policy.evaluate(state.metrics, current_floors).passed,
+            not result.gate or quality_policy.evaluate(state.metrics, current_floors).passed,
             "accepted state violates quality thresholds",
         )
         return dict(pairs)
@@ -178,7 +185,7 @@ def audit_selection(
                 ),
                 "metric change differs from full baseline",
             )
-        decision = quality_policy.evaluate(trial.metrics, current_floors)
+        decision = quality_policy.evaluate(trial.metrics, current_floors) if result.gate else QualityDecision(True, 0., ())
         require(
             trial.accepted == decision.passed
             and trial.failed_metrics == decision.failed_metrics,
@@ -201,7 +208,7 @@ def audit_selection(
         planner.observe(removed, trial.accepted)
         if trial.accepted:
             accepted_margins.append(decision.worst_margin)
-            if external_cv:
+            if external_cv and result.gate:
                 current_floors = quality_policy.advance(current_floors, trial.metrics)
             current, current_metrics, current_trial = (
                 proposed,
@@ -209,7 +216,6 @@ def audit_selection(
                 trial.trial_id,
             )
             configuration += 1
-            failed.clear()
             final_trial_ids.clear()
             snapshot_index += 1
             require(
@@ -217,12 +223,15 @@ def audit_selection(
             )
             ranking = check_snapshot()
     require(snapshot_index + 1 == len(result.shap_history), "extra accepted snapshots")
+    selected = result.accepted_history[-1] if result.gate else max(
+        result.accepted_history, key=lambda state: state.metrics.f1_macro)
+    require(result.selected_state == selected, 'selected trial differs from last/best F1 rule')
     require(
-        current == result.selected_group_ids
-        and groups.columns(current) == result.selected_columns,
+        selected.group_ids == result.selected_group_ids
+        and groups.columns(selected.group_ids) == result.selected_columns,
         "final retained groups or input columns differ",
     )
-    require(close(current_metrics, result.final_metrics), "final metrics differ")
+    require(close(selected.metrics, result.final_metrics), "final metrics differ")
     if len(current) == min_groups:
         require(
             result.stop_reason == "min_groups_reached",
@@ -313,7 +322,7 @@ def audit_selection(
         ],
     )
     initial_margin = quality_policy.evaluate(result.baseline_metrics,
-        result.effective_floors).worst_margin
+        result.effective_floors).worst_margin if result.gate else 0.
     min_margin = min([initial_margin] + accepted_margins) * 100
     observations = [
         ("Feasible full-model initialization", "Passed", "Verified"),
@@ -377,6 +386,16 @@ def audit_selection(
                 ),
             ]
         )
+    if not result.retry:
+        observations = [(a, 'All remaining units have a historical singleton rejection; not a fresh final-configuration certificate' if a == 'Final single-deletion condition' and len(current) > min_groups else b, c) for a,b,c in observations]
+        observations.append(('Retry disabled', 'Failed singletons remain excluded after acceptance; historical failures are not retested in the final configuration', 'Verified'))
+    if not result.gate:
+        observations = [row for row in observations if row[0] not in
+            ('Feasible full-model initialization', 'All accepted states feasible', 'Gate score source', 'Final single-deletion condition')]
+        observations.append(('No-gate selection', f'Raw highest F1; first tie; selected trial {selected.trial_id}; terminal trial {current_trial}', 'Verified'))
+    if not result.shap:
+        retry = retry.rename(columns={c:c.replace('SHAP', 'Random priority') for c in retry.columns})
+        observations = [(a.replace('SHAP', 'Random ranking'), b, c) for a,b,c in observations]
     return SelectionAudit(
         pd.DataFrame(observations, columns=["Property", "Observed", "Status"]),
         final,

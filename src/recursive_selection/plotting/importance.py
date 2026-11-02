@@ -39,6 +39,8 @@ def plot_importance_evolution(result, *, title=None, group_labels=None, unit_nam
     Values share one linear scale across configurations. Missing groups are NaN,
     not zero. The caller supplies attribution-specific labels for custom rankers.
     """
+    if not result.shap:
+        value_label = 'Random priority'
     plt = _pyplot()
     from matplotlib.colors import Normalize
     from matplotlib.patches import Patch
@@ -69,9 +71,9 @@ def plot_importance_evolution(result, *, title=None, group_labels=None, unit_nam
         for trial, count in zip(data["trial_ids"], data["group_counts"])
     ], rotation=65, ha="right")
     ax.set_ylabel(f"Original {unit_name} ID")
-    ax.set_xlabel("Accepted model configuration (trial number; rejected trials omitted)")
+    ax.set_xlabel("Accepted model configuration (trial number; rejected trials omitted)" if result.gate else "Visited model configuration (selected model may be earlier)")
     ax.set_title((title or "Group Importance During Recursive Elimination") +
-                 "\nFull model and accepted configurations | Shared scale, no normalization")
+                 ("\nFull model and accepted configurations | Shared scale, no normalization" if result.gate else "\nFull model and visited configurations | Gate disabled"))
     fig.colorbar(image, ax=ax, pad=0.02, label=value_label)
     ax.legend(handles=[
         Patch(facecolor="#b0b0b0", label=f"Removed {unit_name} (NaN: importance unavailable)"),

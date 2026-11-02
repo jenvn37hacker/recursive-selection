@@ -28,7 +28,7 @@ from .results import (
     CVScoreSummary,
     CVEvaluationTrace,
     CVPrunedEvaluation,
-    ValidationFold,
+    ValidationFold, validate_search_options,
     FixedCVEvaluationTrace,
 )
 
@@ -160,6 +160,10 @@ def save_selector(selector, directory):
         metadata.update(policy_type=policy_type, cv_evaluation=asdict(selector.cv_evaluation_))
     if selector.result_.recording_split is not None:
         metadata['recording_split'] = selector.result_.recording_split.to_config()
+    options = selector.result_.search_options
+    if options != dict(retry=True, shap=True, gate=True, random_state=42):
+        metadata.update(format_version=11, search_options=options,
+                        selected_trial_id=selector.result_.selected_state.trial_id)
     # Validate serialization before writing any files.
     encoded = _encode(metadata)
     directory.mkdir(parents=True, exist_ok=True)
@@ -181,8 +185,14 @@ def load_selector(directory, *, trusted=False):
         json.loads((directory / "selection.json").read_text(encoding="utf-8"))
     )
     data = _migrate_metadata(data)
-    if data["format_version"] not in (2, 3, 4, 5, 6, 7, 8, 9, 10):
+    if data["format_version"] not in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
         raise ValueError("Unsupported selection metadata version.")
+    options = dict(retry=True, shap=True, gate=True, random_state=42)
+    if data['format_version'] == 11:
+        if set(data.get('search_options', {})) != set(options) or 'selected_trial_id' not in data:
+            raise ValueError('Format 11 requires search options and selected trial provenance.')
+        options = data['search_options']
+    validate_search_options(**options)
     mode = (
         data.get("selection_mode", "group")
         if data["format_version"] == 2
@@ -262,14 +272,14 @@ def load_selector(directory, *, trusted=False):
     policy_name = data.get("policy_type", "macro")
     if data["format_version"] in (4, 5) and policy_name != "cv_reference":
         raise ValueError("CV formats require CV policy metadata.")
-    if (data['format_version'] in (7, 8, 9, 10)) != (policy_name == 'fixed_cv_f1'):
+    if data['format_version'] != 11 and ((data['format_version'] in (7, 8, 9, 10)) != (policy_name == 'fixed_cv_f1')):
         raise ValueError('External-fold F1 CV requires format 7/8/9/10 and matching policy metadata.')
-    if data['format_version'] in (9, 10) and not all(
+    if data['format_version'] in (9, 10, 11) and policy_name == 'fixed_cv_f1' and not all(
             key in data.get('cv_evaluation', {}) for key in ('fold_kind', 'checkpoint_metric')):
         raise ValueError('Format 9/10 requires fold kind and checkpoint metric provenance.')
-    if data['format_version'] not in (9, 10) and data.get('recording_split') is not None:
+    if data['format_version'] not in (9, 10, 11) and data.get('recording_split') is not None:
         raise ValueError('Recording split provenance requires format 9/10.')
-    if (data['format_version'] not in (9, 10)
+    if (data['format_version'] not in (9, 10, 11)
             and data.get('cv_evaluation', {}).get('fold_kind', 'partition') != 'partition'):
         raise ValueError('Repeated holdouts require format 9/10.')
     if policy_name not in {"macro", "cv_reference", "f1_reference", 'fixed_cv_f1'}:
@@ -279,7 +289,7 @@ def load_selector(directory, *, trusted=False):
         if (policy_config.get('truncate_decimals') is None
                 or data.get('cv_evaluation', {}).get('truncate_decimals') is None):
             raise ValueError('Format 10 requires explicit truncation precision in policy and CV trace.')
-    elif (policy_config.get('truncate_decimals') is not None
+    elif data['format_version'] != 11 and (policy_config.get('truncate_decimals') is not None
             or data.get('cv_evaluation', {}).get('truncate_decimals') is not None):
         raise ValueError('Truncated CV gates require format 10.')
     if policy_name == 'fixed_cv_f1':
@@ -336,6 +346,8 @@ def load_selector(directory, *, trusted=False):
         tuple(
             data.get("gate_metrics", ("precision_macro", "recall_macro", "f1_macro"))
         ),
+        **options,
+        selected_trial_id=data.get('selected_trial_id') if data['format_version'] == 11 else None,
     )
     if cv_trace is not None:
         if policy_name == 'fixed_cv_f1' and cv_trace.checkpoint_metric != getattr(adapter, 'early_stopping_metric', 'custom'):
@@ -357,7 +369,7 @@ def load_selector(directory, *, trusted=False):
         "min_features" if mode == "feature" else "min_groups": data["min_groups"]
     }
     selector = selector_class(
-        model_adapter=adapter, quality_policy=policy, speed_options=speed, **minimum
+        model_adapter=adapter, quality_policy=policy, speed_options=speed, **options, **minimum
     )
     selector.adapter_ = adapter
     # Only the final model is persisted. The original full model is not restored.
@@ -371,7 +383,7 @@ def load_selector(directory, *, trusted=False):
     selector.attempted_group_ids_ = tuple(data["attempted_group_ids"])
     selector.rejected_group_ids_ = tuple(data["rejected_group_ids"])
     selector._set_result(result)
-    if data["format_version"] in (6, 7, 8, 9):
+    if data["format_version"] in (6, 7, 8, 9, 10, 11):
         from .evaluation import audit_selection
 
         audit_selection(

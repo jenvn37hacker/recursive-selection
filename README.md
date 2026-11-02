@@ -1249,3 +1249,90 @@ persists the F1 policy, batch settings and active `gate_metrics`. Older formats
 remain readable. `SelectionReport.gate_constraints` reports only active
 constraints; all three macro metrics remain in trial histories. Score plots draw
 only active threshold lines, and `audit_selection` replays the gate and scheduling.
+
+## Ablation switches: retry, SHAP and gate
+
+Both `RecursiveFeatureSelector` and `RecursiveGroupSelector` accept the
+following keyword arguments (the defaults preserve the original search):
+
+```python
+selector = RecursiveFeatureSelector(
+    model_adapter=adapter,
+    quality_policy=CVF1ReferenceQualityPolicy(reference="full", truncate_decimals=2),
+    retry=True,
+    shap=True,
+    gate=True,
+    random_state=42,
+    speed_options=BatchRemovalOptions(removal_fraction=0.1, cv_jobs=2, cpu_budget=4),
+)
+selector.fit_cv(X_dev, y_dev, cv_splits=fixed_splits)
+```
+
+**`retry=True` requires `gate=True`.** An invalid combination raises `ValueError`
+at construction, before fitting. Flags must be actual booleans. `random_state`
+is a nonnegative integer for the ranking RNG, separate from estimator seeds.
+
+| Ablation | retry | shap | gate |
+|---|---|---|---|
+| Full method | True | True | True |
+| No Retry | False | True | True |
+| Random instead of SHAP | True | False | True |
+| No Gate / best-path F1 | False | True | False |
+| Random + No Retry | False | False | True |
+| Random + No Gate | False | False | False |
+
+- `retry=False`: a **singleton** rejected by the gate stays ineligible throughout
+  the search, including after another removal succeeds. A failed batch does not
+  mark all its members as failed. Backoff still halves a failed batch; a success
+  resets the batch size. Historical singleton failures are not proof that every
+  remaining feature fails when tested in the final configuration.
+- `shap=False`: no backend SHAP calculation is called. A fresh permutation of
+  nonnegative priorities ranks the retained units at initialization and after
+  every successful removal (every visited step when ungated). Ranking stays fixed
+  during failed attempts/backoff in one configuration. Each `fit` resets the
+  private RNG to `random_state`; CV scheduling does not consume this RNG. Omit
+  `ranker` in random mode; combining a custom ranker with `shap=False` is an error.
+  Existing custom rankers remain supported with `shap=True`.
+- `gate=False`: set `retry=False` explicitly. The search advances every batch
+  without quality rejection/backoff until the minimum size, then returns the
+  **highest raw mean Validation macro F1** along the visited path, **including
+  Full**. Exact ties retain the first visited maximum. No truncation or SD/SE
+  allowance affects this choice. The configured policy is still retained as
+  protocol metadata (`fit_cv` still requires `CVF1ReferenceQualityPolicy`).
+
+`fit_cv`/`fit_recording_cv` evaluate complete supplied folds. The selected model
+is that subset's Development refit using `ceil(median(its best fold rounds))`,
+with no validation stopping in the refit. `fit` with a single `eval_set` chooses
+raw Validation F1; with `CVReferenceQualityPolicy` it chooses the complete
+Train-only CV mean F1 and disables gate-based early pruning. Test remains outside
+ranking, stopping and selection. These flags do not change the estimator's
+configured early-stopping metric/patience or the supplied splits.
+
+No Gate resembles a backward SHAP path but is **not** a Probatus clone: native
+Proposed ranking still uses the accepted/visited Development refit and `ceil`
+for fractional batch size. A Development refit is retained for every visited
+state, also in Random mode, keeping this part of the ablation workflow fixed.
+
+### Selected state versus terminal state
+
+`estimator_`, `selected_columns_`, `final_metrics_`, `final_ranking_` and
+`refit_rounds_` always refer to the **selected** subset. `selected_trial_id_`
+identifies it; `last_trial_id_` identifies the last evaluated removal and
+`terminal_group_ids_` the terminal visited subset. `selection_rule_` is
+`last_accepted` with a gate, or `best_raw_f1` without one. It is valid for No Gate
+to return Full after the search reaches one feature.
+
+For backward compatibility, `accepted_history_` and `shap_history_` retain their
+names. When ungated, "accepted" means advancing the search, **not passing a
+quality test**; it covers all visited states. `visited_history_` and
+`importance_history_` are presentation aliases. In random mode the importance
+snapshots store random priorities, and `ranking_source_` labels them accordingly.
+Reports use `Visited (gate disabled)` rather than a quality PASS, expose no
+active gate constraints, and label/export random ranking separately from SHAP.
+Recorder events carry `gate_enabled`, `retry_enabled` and `ranking_source`, so
+custom notebook recorders can use the same presentation.
+
+Native bundles with non-default ablation options use format 11 and persist
+options, seed, selected trial and all visited evidence. Old formats load with
+all three flags `True` and ranking seed 42. Save/load audits replay the selected
+versus terminal distinction, raw-F1 maximum, random schedule and no-retry rules.
