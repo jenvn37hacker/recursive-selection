@@ -30,6 +30,8 @@
 
 ### Features
 
+- Add an opt-in four-fold/one-thread CV preset, effective worker allocation
+  events, and reloadable initial/final Full or Best F1 gate attributes.
 - Default built-in early stopping to Validation Accuracy (patience 5), with explicit
   configured-metric compatibility for existing workflows and saved specifications.
 - Add metadata-based Z24/chronological recording holdouts, parent-preserving class

@@ -71,6 +71,18 @@ class BatchRemovalOptions:
     cv_jobs: int = 1
     cpu_budget: int | None = None
 
+    @classmethod
+    def four_fold(cls, *, removal_fraction=0.1):
+        """Run up to four CPU folds together, with one training thread each.
+
+        For four supplied folds this requests 4 workers within a 4-thread budget.
+        Available CPU quotas and GPU backends can reduce the worker count.
+        This does not change the adapter's standalone Development refit settings
+        or the number/membership of supplied folds. Set adapter threads to 1 as
+        well when the same limit is desired for refits.
+        """
+        return cls(removal_fraction=removal_fraction, cv_jobs=4, cpu_budget=4)
+
     def __post_init__(self):
         for name in ('cv_jobs', 'cpu_budget'):
             value = getattr(self, name)

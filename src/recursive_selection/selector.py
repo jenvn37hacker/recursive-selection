@@ -76,6 +76,9 @@ class _RecursiveSelectorBase:
             payload.setdefault('gate_enabled', self.gate)
             payload.setdefault('retry_enabled', self.retry)
             payload.setdefault('ranking_source', 'SHAP' if self.shap else 'Random ranking')
+            payload.setdefault('gate_reference', self.quality_policy.reference
+                               if self.gate and isinstance(self.quality_policy, CVF1ReferenceQualityPolicy)
+                               else None)
             self.recorder.record(deepcopy({"event": kind, **payload}))
 
     def _rank(self, adapter, model, X, y, feature_groups, group_ids):
@@ -518,6 +521,18 @@ class _RecursiveSelectorBase:
         self.selected_feature_names_ = result.selected_feature_names
         self.baseline_metrics_ = result.baseline_metrics
         self.effective_floors_ = result.effective_floors
+        # Initial floors remain immutable provenance. Expose the active final
+        # reference separately, including after a saved bundle is restored.
+        self.gate_reference_ = (self.quality_policy.reference
+                               if result.gate and isinstance(self.quality_policy, CVF1ReferenceQualityPolicy)
+                               else None)
+        self.initial_f1_gate_ = self.final_f1_gate_ = None
+        if self.gate_reference_ is not None:
+            floors = result.effective_floors
+            self.initial_f1_gate_ = floors.f1_macro
+            for state in result.accepted_history[1:]:
+                floors = self.quality_policy.advance(floors, state.metrics)
+            self.final_f1_gate_ = floors.f1_macro
         self.final_metrics_ = result.final_metrics
         self.best_f1_ = max(state.metrics.f1_macro for state in result.accepted_history)
         self.history_ = result.history

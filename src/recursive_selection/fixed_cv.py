@@ -85,6 +85,10 @@ def evaluate_external_folds(selector, X, y, folds, classes, trial_id=0, forbidde
     jobs, threads = options.resources(len(folds), adapter) if options else (1, None)
     # A default sequential fit retains the adapter's original thread settings.
     managed = options is not None and (options.cv_jobs > 1 or options.cpu_budget is not None)
+    parameter = 'thread_count' if getattr(adapter, 'backend_name', '') == 'catboost' else 'n_jobs'
+    actual_threads = threads if managed else getattr(adapter, 'params', {}).get(parameter)
+    selector._emit('cv_evaluation_started', trial_id=trial_id, folds=len(folds),
+                   cv_workers=jobs, cv_threads_per_model=actual_threads)
 
     def run_fold(model, fold, worker):
         train, val = np.asarray(fold.train_rows), np.asarray(fold.validation_rows)

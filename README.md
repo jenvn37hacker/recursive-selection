@@ -1336,3 +1336,58 @@ Native bundles with non-default ablation options use format 11 and persist
 options, seed, selected trial and all visited evidence. Old formats load with
 all three flags `True` and ranking seed 42. Save/load audits replay the selected
 versus terminal distinction, raw-F1 maximum, random schedule and no-retry rules.
+
+### Full or best-so-far F1 gate with four parallel folds
+
+The existing policy parameter `reference` selects the gate. It is independent
+of `retry`, `shap` and the number of fold workers:
+
+```python
+adapter = CatBoostAdapter(
+    params=dict(iterations=1000, depth=5, learning_rate=0.03,
+                random_seed=42, thread_count=1, verbose=False,
+                allow_writing_files=False),
+    early_stopping_rounds=5,
+    early_stopping_metric="accuracy",
+)
+selector = RecursiveFeatureSelector(
+    model_adapter=adapter,
+    quality_policy=CVF1ReferenceQualityPolicy(
+        reference="best",         # "full" keeps the original Full threshold
+        truncate_decimals=2,
+    ),
+    retry=False, gate=True, shap=True,
+    speed_options=BatchRemovalOptions.four_fold(removal_fraction=0.1),
+)
+# fixed_splits contains four caller-defined Train/Validation pairs.
+selector.fit_cv(X_dev, y_dev, cv_splits=fixed_splits)
+print(selector.gate_reference_, selector.initial_f1_gate_, selector.final_f1_gate_)
+```
+
+`reference="full"` fixes the gate at Full's mean Validation macro F1.
+`reference="best"` starts there and raises the gate after an accepted improvement;
+rejections never change it. Both average all fold scores before optional
+truncation. For example, Full `0.689989` initializes a `0.68` gate. An accepted
+`0.705` leaves the Full gate at `0.68`, but raises the Best gate to `0.70`.
+A later `0.695` passes Full and fails Best. A `0.701` still passes Best: truncated
+gates do not require raw F1 to increase within a decimal bucket. With either gate,
+the returned model is the **last accepted** subset. With `gate=False`, the policy
+reference is inactive and the highest **raw** F1 along the visited path wins.
+
+`BatchRemovalOptions.four_fold()` is an opt-in preset equivalent to
+`BatchRemovalOptions(removal_fraction=0.1, cv_jobs=4, cpu_budget=4)`. With four CPU
+folds and at least four available CPUs, four workers each fit one fold with one
+training thread. CPU quotas can reduce concurrency; GPU backends remain serialized.
+The preset neither creates folds nor overrides an explicitly configured existing
+`speed_options`. Old defaults are unchanged. It only controls CV fitting: set the
+adapter's own thread count to one too if Development refits should also use one.
+Trials remain sequential, and every candidate completes all four folds before
+gate comparison. Each fold keeps its own fresh model and early-stopping state.
+
+Recorder event `cv_evaluation_started` reports `trial_id`, `folds`, `cv_workers`
+and `cv_threads_per_model`. Existing `cv_fold_started` events mark task submission,
+so four such events alone do not prove four active workers. Events also expose
+the active `gate_reference` (`None` when inactive). Initial/final gate attributes
+are reconstructed on bundle reload; `effective_floors_` retains the initial
+Full threshold as provenance. Compare scores and best rounds when changing
+thread allocation, and benchmark to establish which allocation is faster.
