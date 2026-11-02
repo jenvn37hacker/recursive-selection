@@ -12,7 +12,7 @@ from .policies import (
 from .selector import RecursiveFeatureSelector, RecursiveGroupSelector
 from .recording_split import SetupRecordingSplit, RecordingSplit
 
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 __all__ = [
     "RecursiveGroupSelector",
     "RecursiveFeatureSelector",

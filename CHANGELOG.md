@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.9.0 (2026-11-02)
+
+### Features
+
+- Expose F1 gate state and four-fold CPU preset
+  ([`2b410d0`](https://github.com/jenvn37hacker/recursive-selection/commit/2b410d023a2372fc9f8105be31feb6e49d161279))
+
+
 ## v1.8.0 (2026-11-02)
 
 ### Features
