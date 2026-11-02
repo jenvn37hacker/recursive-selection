@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.8.0 (2026-11-02)
+
+### Features
+
+- Add retry SHAP and gate ablation controls
+  ([`f99da18`](https://github.com/jenvn37hacker/recursive-selection/commit/f99da18f216e98e2dcbe94170297895602907ec0))
+
+
 ## v1.7.0 (2026-11-01)
 
 ### Features
