@@ -140,11 +140,14 @@ class CVReferenceQualityPolicy:
 class F1ReferenceQualityPolicy:
     """Accept when Validation macro F1 matches the original full-model reference.
 
-    The reference stays fixed throughout selection. Precision and recall remain
-    diagnostics. Reusing Validation for search does not guarantee Test quality.
+    Defaults preserve the original fixed, raw Full reference. Opt in to a
+    running Best reference or decimal truncation for single-Validation searches.
+    Precision/recall remain diagnostics; this is not a Test guarantee.
     """
 
     tolerance: float = 1e-12
+    reference: str = 'full'
+    truncate_decimals: int | None = None
     gate_metrics = ("f1_macro",)
 
     def __post_init__(self):
@@ -154,10 +157,35 @@ class F1ReferenceQualityPolicy:
             or self.tolerance < 0
         ):
             raise ValueError("tolerance must be finite and nonnegative.")
+        if self.reference not in ('best', 'full'):
+            raise ValueError("reference must be 'best' or 'full'.")
+        if self.truncate_decimals is not None and (
+            isinstance(self.truncate_decimals, bool)
+            or not isinstance(self.truncate_decimals, Integral)
+            or not 0 <= self.truncate_decimals <= 15
+        ):
+            raise ValueError('truncate_decimals must be None or an integer from 0 to 15.')
 
     def thresholds(self, baseline):
         self._validate(baseline)
-        return MacroScores(0.0, 0.0, baseline.f1_macro)
+        return MacroScores(0.0, 0.0, self.gate_value(baseline.f1_macro))
+
+    def gate_value(self, f1):
+        """Truncate only the comparison value; keep raw recorded F1 unchanged."""
+        if isinstance(f1, bool) or not isinstance(f1, Real) or not isfinite(f1) or not 0 <= f1 <= 1:
+            raise ValueError('F1 must be finite and between 0 and 1.')
+        if self.truncate_decimals is None:
+            return float(f1)
+        quantum = Decimal(1).scaleb(-int(self.truncate_decimals))
+        return float(Decimal(str(f1)).quantize(quantum, rounding=ROUND_DOWN))
+
+    def advance(self, floors, scores):
+        """Advance a Best gate only after acceptance; Full remains fixed."""
+        self._validate(floors)
+        self._validate(scores)
+        if self.reference == 'best':
+            return MacroScores(0., 0., max(floors.f1_macro, self.gate_value(scores.f1_macro)))
+        return floors
 
     @staticmethod
     def _validate(scores):
@@ -171,11 +199,16 @@ class F1ReferenceQualityPolicy:
     def evaluate(self, scores, thresholds):
         self._validate(scores)
         self._validate(thresholds)
-        margin = scores.f1_macro - thresholds.f1_macro
-        failed = ("f1_macro",) if margin < -self.tolerance else ()
+        margin = self.gate_value(scores.f1_macro) - self.gate_value(thresholds.f1_macro)
+        tolerance = self.tolerance if self.truncate_decimals is None else 0.
+        failed = ("f1_macro",) if margin < -tolerance else ()
         return QualityDecision(not failed, margin, failed)
 
     def to_config(self):
+        # Keep legacy single-Validation bundles byte-compatible at the policy
+        # schema level; CV policies always retain their explicit reference.
+        if type(self) is F1ReferenceQualityPolicy and self.reference == 'full' and self.truncate_decimals is None:
+            return {'tolerance': self.tolerance}
         return asdict(self)
 
 

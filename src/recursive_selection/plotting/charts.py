@@ -102,6 +102,15 @@ def plot_accepted_scores(
             label=label,
         )
         if key in result.gate_metrics:
+            if key == 'f1_macro' and result.validation_f1_reference == 'best':
+                from ..policies import F1ReferenceQualityPolicy
+                policy = F1ReferenceQualityPolicy(reference='best',
+                    truncate_decimals=result.validation_truncate_decimals)
+                reference = np.maximum.accumulate([
+                    policy.gate_value(state.metrics.f1_macro) for state in result.accepted_history])
+                ax.step(counts, 100*reference, where='post', color=color,
+                        linestyle='--', alpha=.6, label='Best Validation F1 gate so far')
+                continue
             if key == 'f1_macro' and getattr(result.cv_evaluation, 'reference', None) == 'best':
                 reference = np.maximum.accumulate([state.metrics.f1_macro for state in result.accepted_history])
                 ax.step(counts, 100*reference, where='post', color=color,

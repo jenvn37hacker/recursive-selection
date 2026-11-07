@@ -86,6 +86,15 @@ class LightGBMAdapter(BaseModelAdapter):
         codes = (probabilities > 0.5).astype(int) if probabilities.ndim == 1 else probabilities.argmax(axis=1)
         return self._loaded_classes[codes]
 
+    def predict_proba(self, model, X):
+        """Return class-ordered probabilities for classifiers and reloaded Boosters."""
+        if hasattr(model, 'predict_proba'):
+            return super().predict_proba(model, X)
+        probabilities = np.asarray(model.predict(X), dtype=float)
+        if probabilities.ndim == 1:
+            return np.column_stack((1.-probabilities, probabilities))
+        return probabilities
+
     def save_model(self, model, path):
         self._booster(model).save_model(str(path))
 

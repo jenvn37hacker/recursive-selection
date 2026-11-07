@@ -67,7 +67,7 @@ def audit_selection(
         and 1 <= min_groups <= len(groups.group_ids),
         "invalid minimum group count",
     )
-    from ..policies import CVReferenceQualityPolicy, CVF1ReferenceQualityPolicy
+    from ..policies import CVReferenceQualityPolicy, CVF1ReferenceQualityPolicy, F1ReferenceQualityPolicy
 
     require(
         result.gate_metrics
@@ -75,6 +75,12 @@ def audit_selection(
         "gate metrics differ from the quality policy",
     )
     external_cv = isinstance(quality_policy, CVF1ReferenceQualityPolicy)
+    validation_f1 = isinstance(quality_policy, F1ReferenceQualityPolicy) and not external_cv
+    if validation_f1:
+        explicit_reference = quality_policy.reference != 'full' or quality_policy.truncate_decimals is not None
+        require(result.validation_f1_reference == (quality_policy.reference if explicit_reference else None)
+                and result.validation_truncate_decimals == (quality_policy.truncate_decimals if explicit_reference else None),
+                'Validation F1 reference metadata differs from the policy')
     cv_mode = external_cv or isinstance(quality_policy, CVReferenceQualityPolicy)
     if cv_mode:
         if external_cv:
@@ -186,6 +192,13 @@ def audit_selection(
                 "metric change differs from full baseline",
             )
         decision = quality_policy.evaluate(trial.metrics, current_floors) if result.gate else QualityDecision(True, 0., ())
+        before_f1 = current_floors.f1_macro
+        next_floors = (quality_policy.advance(current_floors, trial.metrics)
+                       if result.gate and trial.accepted and validation_f1 else current_floors)
+        if validation_f1 and result.validation_f1_reference is not None:
+            expected = (before_f1, next_floors.f1_macro) if result.gate else (None, None)
+            require((trial.f1_reference_before, trial.f1_reference_after) == expected,
+                    'Validation F1 reference transition differs from the policy')
         require(
             trial.accepted == decision.passed
             and trial.failed_metrics == decision.failed_metrics,
@@ -208,7 +221,7 @@ def audit_selection(
         planner.observe(removed, trial.accepted)
         if trial.accepted:
             accepted_margins.append(decision.worst_margin)
-            if external_cv and result.gate:
+            if (external_cv or validation_f1) and result.gate:
                 current_floors = quality_policy.advance(current_floors, trial.metrics)
             current, current_metrics, current_trial = (
                 proposed,

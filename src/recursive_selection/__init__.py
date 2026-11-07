@@ -11,6 +11,7 @@ from .policies import (
 )
 from .selector import RecursiveFeatureSelector, RecursiveGroupSelector
 from .recording_split import SetupRecordingSplit, RecordingSplit
+from .holdout import HoldoutSelection
 
 __version__ = "1.9.0"
 __all__ = [
@@ -29,4 +30,5 @@ __all__ = [
     "SklearnGBCAdapter",
     "SetupRecordingSplit",
     "RecordingSplit",
+    "HoldoutSelection",
 ]

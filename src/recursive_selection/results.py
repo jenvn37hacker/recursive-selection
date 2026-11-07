@@ -116,6 +116,8 @@ class SelectionResult:
     gate: bool = True
     random_state: int = 42
     selected_trial_id: int | None = None
+    validation_f1_reference: str | None = None
+    validation_truncate_decimals: int | None = None
 
     @property
     def selected_state(self):

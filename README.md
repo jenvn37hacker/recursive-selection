@@ -903,6 +903,106 @@ labels, recording groups and source metadata on load. Old bundles remain readabl
 The final selected model is persisted; the in-memory `full_model_` is not restored.
 Selection reports additionally export recording membership and Validation coverage.
 
+## One selected baseline fold: Train/Validation selection, Development refits
+
+Use `HoldoutSelection` when a baseline has already chosen **one** outer fold
+and that fold's hyperparameter winner. This is separate from `fit_cv()` and
+`fit_recording_cv()`: it does not average folds, search hyperparameters, or choose
+a fold by inspecting Test. Supply the original split rows and winner parameters;
+do not call the automatic fixed-Test metadata split policy for this protocol.
+
+```python
+from recursive_selection import (
+    HoldoutSelection, RecursiveFeatureSelector, CatBoostAdapter,
+    F1ReferenceQualityPolicy, BatchRemovalOptions,
+)
+
+selector = RecursiveFeatureSelector(
+    model_adapter=CatBoostAdapter(
+        params={"iterations": 1000, "depth": 5, "l2_leaf_reg": 5,
+                "learning_rate": .03, "loss_function": "Logloss",
+                "random_seed": 42, "thread_count": 1, "verbose": False,
+                "allow_writing_files": False},  # use THIS fold's baseline winner
+        early_stopping_rounds=5, early_stopping_metric="accuracy",
+    ),
+    quality_policy=F1ReferenceQualityPolicy(reference="full", truncate_decimals=2),
+    speed_options=BatchRemovalOptions(removal_fraction=.1),
+    retry=False, gate=True, shap=True,
+)
+run = HoldoutSelection(selector).fit(
+    X_train, y_train, eval_set=(X_validation, y_validation),
+    # Optional reuse: the Train-only Full checkpoint, NEVER its Development model.
+    full_model=full_train_checkpoint,
+    feature_names=feature_names, fold_id=chosen_fold,
+    train_ids=train_sample_ids, validation_ids=validation_sample_ids,
+    test_ids=test_sample_ids,  # metadata only: Test X/y is not accepted by fit
+    train_groups=train_recording_keys, validation_groups=validation_recording_keys,
+    test_groups=test_recording_keys,
+    test_used_for_fold_choice=True,  # disclose if baseline chose after seeing Test
+)
+
+# Selection/gate evidence refers to Train-only models and the same Validation.
+print(selector.baseline_metrics_, selector.final_metrics_)
+print(selector.selected_columns_, selector.initial_f1_gate_, selector.final_f1_gate_)
+print(run.full_refit_rounds_, run.refit_rounds_)
+
+# After feature selection and both Development refits have finished:
+full_predictions = run.predict(X_test, model="full")
+selected_predictions = run.predict(X_test)  # model="selected"
+probabilities = run.predict_proba(X_test)
+run.save("new_holdout_bundle")
+restored = HoldoutSelection.load("new_holdout_bundle")  # GBC: trusted=True
+```
+
+`X_*` are already extracted features in the original ordered schema. A supplied
+Full checkpoint must have been fitted on exactly the same Train rows using the
+same Validation stopping protocol and parameters; the caller owns its training
+provenance. Without `full_model`, the wrapper fits a fresh Full Train checkpoint.
+Neither preprocessing nor a feature recipe is guessed from sample values.
+
+SHAP ranks low-to-high on **Train** using the current Train-only model. Every
+trial fits a fresh Train model, with Validation used for stopping and F1 scoring.
+Accepted states recompute SHAP on Train. The retry/batch/backoff rules are shared
+with the existing selector. `reference="full"` fixes the initial Validation F1
+gate; `reference="best"` advances it after accepted improvements. Optional
+`truncate_decimals=2` compares truncated values; raw scores are preserved. The
+legacy `F1ReferenceQualityPolicy()` still defaults to fixed raw Full F1.
+`retry=True` requires `gate=True`; ungated selection returns the first highest
+raw Validation F1 along the visited path, including Full.
+
+After the subset is frozen, the wrapper trains **two fresh** models on the exact
+concatenation of Train + Validation. Full uses its own Full checkpoint's best
+round count; Selected uses its own selected checkpoint's best round count,
+including when ungated selection returns an earlier state. There is **no median**
+and no early stopping/eval_set in these Development fits. LightGBM may intrinsically
+stop before a requested budget if no valid split remains. `run.predict*()` uses
+the Development refits; `selector.predict()` still uses the Train-only Selected
+checkpoint. This separation preserves the original gate evidence and audit.
+
+Optional IDs and recording keys are validated before fitting: sample IDs are
+unique and the supplied Train/Validation/Test pools cannot overlap. Recording
+keys may repeat within a pool but must be globally unambiguous (include condition
+when recording numbers repeat). Omitted identities mean that recording separation
+cannot be checked. Test metadata is recorded; no Test features, labels or score
+are used by the wrapper's fit. `test_used_for_fold_choice` separately records
+whether the caller selected the baseline fold after viewing Test; such a result
+is descriptive, not an independent Test estimate.
+
+Bundles preserve the Selected Train checkpoint and its full selection history,
+the Full Train checkpoint, both Development models, budgets, identities and
+provenance. Files are hash checked on load; GBC requires explicit joblib trust.
+New single-Validation Best/truncated policies use selector format 12; previous
+formats remain readable. Reports export each trial's reference before/after.
+
+For four independent outer splits, instantiate **four independent** wrappers
+with each split's own IDs, winner adapter and Full checkpoint, then report paired
+Full/Selected scores per split and descriptive mean/SD. Feature subsets may differ.
+They must not be merged into one Development pool: one split's Test may be another
+split's Development. Each trial within a single-fold wrapper has one model, so
+`BatchRemovalOptions.cv_jobs` does not launch four fits there. Parallelize independent
+outer runs in the calling experiment and bound each adapter's fit threads to avoid
+CPU oversubscription; existing CV mode retains its four-fold parallel option.
+
 ## External-fold mean F1 selection matching a baseline
 
 Use `fit_cv()` when the baseline already has fixed development Train/Validation

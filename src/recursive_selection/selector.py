@@ -9,7 +9,7 @@ import numpy as np
 from .groups import FeatureGroups, labels, numeric_matrix
 from .acceleration import SelectionSpeedOptions, BatchRemovalOptions, RemovalPlanner
 from .importance import MeanAbsoluteShapRanker
-from .policies import MacroQualityPolicy, CVReferenceQualityPolicy, CVF1ReferenceQualityPolicy
+from .policies import MacroQualityPolicy, CVReferenceQualityPolicy, F1ReferenceQualityPolicy, CVF1ReferenceQualityPolicy
 from .cross_validation import make_folds, evaluate_folds
 from .results import (
     AcceptedState,
@@ -77,7 +77,7 @@ class _RecursiveSelectorBase:
             payload.setdefault('retry_enabled', self.retry)
             payload.setdefault('ranking_source', 'SHAP' if self.shap else 'Random ranking')
             payload.setdefault('gate_reference', self.quality_policy.reference
-                               if self.gate and isinstance(self.quality_policy, CVF1ReferenceQualityPolicy)
+                               if self.gate and isinstance(self.quality_policy, F1ReferenceQualityPolicy)
                                else None)
             self.recorder.record(deepcopy({"event": kind, **payload}))
 
@@ -257,6 +257,10 @@ class _RecursiveSelectorBase:
                 cv_fit_count=len(cv_folds),
             )
         floors = self.quality_policy.thresholds(cv_baseline if cv_mode else baseline) if self.gate else MacroScores(0., 0., 0.)
+        current_floors = floors
+        f1_policy = isinstance(self.quality_policy, F1ReferenceQualityPolicy)
+        validation_reference = f1_policy and (
+            self.quality_policy.reference != 'full' or self.quality_policy.truncate_decimals is not None)
         if not self._decision(baseline, floors).passed:
             raise ValueError(
                 "Full model does not meet the fixed validation floors; selection did not start."
@@ -368,7 +372,10 @@ class _RecursiveSelectorBase:
                 else:
                     scores = cv_trial.mean
                 cv_trials.append(cv_trial)
-            decision = self._decision(scores, floors)
+            before_f1 = current_floors.f1_macro if self.gate and validation_reference else None
+            decision = self._decision(scores, current_floors)
+            if decision.passed and self.gate and f1_policy:
+                current_floors = self.quality_policy.advance(current_floors, scores)
             if cv_first and decision.passed:
                 trial_model, validation_scores, train_seconds, predict_seconds = (
                     fit_candidate(X_candidate, X_val_candidate)
@@ -397,6 +404,8 @@ class _RecursiveSelectorBase:
                 predict_seconds,
                 removed if speed else (),
                 metric_kind,
+                before_f1,
+                current_floors.f1_macro if self.gate and validation_reference else None,
             )
             history.append(trial)
             attempted.update(removed)
@@ -475,6 +484,8 @@ class _RecursiveSelectorBase:
             speed,
             getattr(self.quality_policy, "gate_metrics", tuple(baseline.as_dict())) if self.gate else (),
             **self._options(selected_trial),
+            validation_f1_reference=self.quality_policy.reference if validation_reference else None,
+            validation_truncate_decimals=self.quality_policy.truncate_decimals if validation_reference else None,
         )
         self._emit(
             "run_finished",
@@ -524,7 +535,7 @@ class _RecursiveSelectorBase:
         # Initial floors remain immutable provenance. Expose the active final
         # reference separately, including after a saved bundle is restored.
         self.gate_reference_ = (self.quality_policy.reference
-                               if result.gate and isinstance(self.quality_policy, CVF1ReferenceQualityPolicy)
+                               if result.gate and isinstance(self.quality_policy, F1ReferenceQualityPolicy)
                                else None)
         self.initial_f1_gate_ = self.final_f1_gate_ = None
         if self.gate_reference_ is not None:

@@ -518,6 +518,35 @@ class SelectionReport:
                 ]
             )
         )
+        if result.validation_f1_reference is not None:
+            from ..policies import F1ReferenceQualityPolicy
+            policy = F1ReferenceQualityPolicy(reference=result.validation_f1_reference,
+                truncate_decimals=result.validation_truncate_decimals)
+            self.validation_f1_history = pd.DataFrame([
+                {'Step': t.trial_id, 'Reference': policy.reference,
+                 'Truncation decimals': policy.truncate_decimals,
+                 'Trial raw F1': t.metrics.f1_macro,
+                 'Trial F1 gate': policy.gate_value(t.metrics.f1_macro) if result.gate else None,
+                 'F1 reference before': t.f1_reference_before,
+                 'F1 reference after': t.f1_reference_after,
+                 'Accepted': t.accepted, 'Margin (pp)': t.worst_margin * 100}
+                for t in result.history], columns=['Step', 'Reference', 'Truncation decimals',
+                    'Trial raw F1', 'Trial F1 gate', 'F1 reference before',
+                    'F1 reference after', 'Accepted', 'Margin (pp)'])
+            for name in ('F1 reference before', 'F1 reference after', 'Trial F1 gate'):
+                self.trials[name] = self.validation_f1_history[name].to_numpy()
+            if result.gate:
+                floors = result.effective_floors
+                for state in result.accepted_history[1:]:
+                    floors = policy.advance(floors, state.metrics)
+                self.gate_constraints['Minimum'] = floors.f1_macro
+                self.gate_constraints['Selected F1 gate'] = policy.gate_value(result.final_metrics.f1_macro)
+                self.gate_constraints['Margin'] = policy.gate_value(result.final_metrics.f1_macro) - floors.f1_macro
+                self.gate_constraints['Reference'] = policy.reference
+                self.gate_constraints['Truncation decimals'] = policy.truncate_decimals
+                if 'Required F1 macro' in self.retry_evidence:
+                    before = self.validation_f1_history.set_index('Step')['F1 reference before']
+                    self.retry_evidence['Required F1 macro'] = self.retry_evidence.Step.map(before)
 
     def style(self, name):
         table = getattr(self, name)
@@ -562,7 +591,9 @@ class SelectionReport:
             "library_timings_seconds": dict(r.timings),
             "gate_metrics": list(r.gate_metrics),
             "cv_f1_reference": getattr(r.cv_evaluation, 'reference', None),
-            "truncate_decimals": getattr(r.cv_evaluation, 'truncate_decimals', None),
+            "validation_f1_reference": r.validation_f1_reference,
+            "truncate_decimals": (r.validation_truncate_decimals if r.validation_f1_reference is not None
+                                  else getattr(r.cv_evaluation, 'truncate_decimals', None)),
             "baseline_metrics": asdict(r.baseline_metrics),
             "effective_floors": asdict(r.effective_floors),
             "final_metrics": asdict(r.final_metrics),
@@ -606,6 +637,8 @@ class SelectionReport:
             f"{prefix}_{u}_{evolution}_evolution_matrix.csv": self.importance_matrix,
             f"{prefix}_{u}_retry_evidence.csv": self.retry_evidence,
         }
+        if hasattr(self, 'validation_f1_history'):
+            tables[f'{prefix}_validation_f1_reference_history.csv'] = self.validation_f1_history
         if self.result.cv_evaluation is not None:
             tables.update(
                 {

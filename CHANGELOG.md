@@ -38,6 +38,13 @@
 
 ### Features
 
+- Add opt-in `HoldoutSelection` for one baseline-selected Train/Validation split,
+  Train-only SHAP/F1 gates, overlap checks, and separate Full/Selected Development
+  refits using their own checkpoint budgets rather than a cross-fold median.
+- Support Full/Best references and decimal truncation for single-Validation F1
+  gates, with auditable trial transitions and reloadable format-12 metadata.
+- Preserve four-fold CV behavior; save/reload complete holdout bundles and support
+  probability prediction from reloaded native LightGBM Boosters.
 - Add an opt-in four-fold/one-thread CV preset, effective worker allocation
   events, and reloadable initial/final Full or Best F1 gate attributes.
 - Default built-in early stopping to Validation Accuracy (patience 5), with explicit
