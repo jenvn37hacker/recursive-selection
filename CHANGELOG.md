@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.10.0 (2026-11-07)
+
+### Features
+
+- Add single-fold selection with development refits
+  ([`0e4699c`](https://github.com/jenvn37hacker/recursive-selection/commit/0e4699ccb361229b53af6d54b0a35352c0b9f5e0))
+
+
 ## v1.9.0 (2026-11-02)
 
 ### Features

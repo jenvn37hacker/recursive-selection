@@ -13,7 +13,7 @@ from .selector import RecursiveFeatureSelector, RecursiveGroupSelector
 from .recording_split import SetupRecordingSplit, RecordingSplit
 from .holdout import HoldoutSelection
 
-__version__ = "1.9.0"
+__version__ = "1.10.0"
 __all__ = [
     "RecursiveGroupSelector",
     "RecursiveFeatureSelector",
